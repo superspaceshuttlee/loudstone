@@ -20,6 +20,11 @@ impl BlockId {
     pub const DIAMOND_ORE: BlockId = BlockId(12);
     pub const BEDROCK: BlockId = BlockId(13);
     pub const WATER: BlockId = BlockId(14);
+    // 15..17 are fixed by the save format: item.rs and every existing save file
+    // store raw block numbers, so these must never be renumbered.
+    pub const TORCH: BlockId = BlockId(15);
+    pub const CRAFTING_TABLE: BlockId = BlockId(16);
+    pub const FURNACE: BlockId = BlockId(17);
 
     #[inline]
     pub fn is_air(self) -> bool {
@@ -29,13 +34,16 @@ impl BlockId {
     /// Whether this block occludes the face of a neighbour (and so that face is culled).
     #[inline]
     pub fn is_opaque(self) -> bool {
-        !matches!(self, BlockId::AIR | BlockId::WATER | BlockId::LEAVES)
+        !matches!(
+            self,
+            BlockId::AIR | BlockId::WATER | BlockId::LEAVES | BlockId::TORCH
+        )
     }
 
     /// Whether the player collides with it.
     #[inline]
     pub fn is_solid(self) -> bool {
-        !matches!(self, BlockId::AIR | BlockId::WATER)
+        !matches!(self, BlockId::AIR | BlockId::WATER | BlockId::TORCH)
     }
 
     /// Base RGB. Visuals are deliberately flat -- shading comes from AO and sun angle.
@@ -55,6 +63,9 @@ impl BlockId {
             BlockId::DIAMOND_ORE => [0.36, 0.80, 0.82],
             BlockId::BEDROCK => [0.15, 0.15, 0.17],
             BlockId::WATER => [0.20, 0.40, 0.75],
+            BlockId::TORCH => [0.95, 0.78, 0.35],
+            BlockId::CRAFTING_TABLE => [0.55, 0.40, 0.24],
+            BlockId::FURNACE => [0.38, 0.38, 0.40],
             _ => [1.0, 0.0, 1.0], // missing-block magenta
         }
     }
@@ -69,6 +80,9 @@ impl BlockId {
             BlockId::DIRT | BlockId::GRASS | BlockId::SAND => 0.6,
             BlockId::WOOD | BlockId::PLANKS => 2.0,
             BlockId::LEAVES => 0.2,
+            BlockId::TORCH => 0.1,
+            BlockId::CRAFTING_TABLE => 2.5,
+            BlockId::FURNACE => 3.5,
             _ => 1.0,
         }
     }

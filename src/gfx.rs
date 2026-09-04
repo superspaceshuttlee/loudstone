@@ -1,28 +1,32 @@
-//! wgpu setup and the terrain render pipeline.
+//! wgpu setup, the terrain pipeline, the target-block highlight, and the HUD pass.
 
 use crate::camera::{Camera, CameraUniform};
-use crate::config::{CHUNK_SIZE_I, RENDER_DISTANCE, SKY_COLOR};
+use crate::chunk::ChunkPos;
+use crate::config::{
+    render_distance_blocks, CHUNK_SIZE_I, FOG_END_FRAC, FOG_START_FRAC, HIGHLIGHT_COLOR,
+    HIGHLIGHT_INFLATE,
+};
+use crate::hud::Hud;
 use crate::mesh::Vertex;
+use crate::world::ChunkMeshData;
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::chunk::ChunkPos;
-
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// GPU buffers for one chunk's mesh.
 pub struct ChunkMesh {
-    pub vbuf: wgpu::Buffer,
-    pub ibuf: wgpu::Buffer,
-    pub index_count: u32,
+    vbuf: wgpu::Buffer,
+    ibuf: wgpu::Buffer,
+    index_count: u32,
     /// World-space centre, for frustum culling.
-    pub center: glam::Vec3,
+    center: glam::Vec3,
 }
 
 pub struct Renderer {
-    pub surface: wgpu::Surface<'static>,
+    surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
@@ -31,14 +35,26 @@ pub struct Renderer {
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
-    pub meshes: HashMap<ChunkPos, ChunkMesh>,
+    meshes: HashMap<ChunkPos, ChunkMesh>,
+    /// Rebuilt only when the targeted block changes.
+    highlight: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    highlight_at: Option<(i32, i32, i32)>,
+    /// Mobs and other moving geometry, rebuilt every frame and never frustum
+    /// culled as a unit -- it is one small buffer covering the whole scene.
+    entities: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    /// True when the swapchain is not an sRGB format and the shader must encode.
+    encode_srgb: bool,
+    /// The overlay. Owned here so a frame is recorded in one place; call
+    /// `hud.begin(..)` and the draw helpers from the main loop before `render`.
+    pub hud: Hud,
+    pub drawn_indices: u32,
+    pub drawn_chunks: u32,
 }
 
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(window.clone())
             .expect("create surface");
@@ -67,25 +83,21 @@ impl Renderer {
             .expect("request device");
 
         // Start from the driver's own defaults so new fields in future wgpu
-        // versions do not have to be enumerated here, then override what matters.
+        // versions need not be enumerated here, then override what matters.
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .expect("surface is not supported by this adapter");
         config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
         config.present_mode = wgpu::PresentMode::AutoVsync;
         let format = config.format;
+        let encode_srgb = !format.is_srgb();
         surface.configure(&device, &config);
 
-        let camera_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
-            contents: bytemuck::cast_slice(&[CameraUniform {
-                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-                cam_pos: [0.0; 3],
-                fog_start: 0.0,
-                sky_color: SKY_COLOR,
-                fog_end: 1.0,
-            }]),
+            size: std::mem::size_of::<CameraUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -161,6 +173,7 @@ impl Renderer {
         });
 
         let depth_view = create_depth(&device, &config);
+        let hud = Hud::with_depth(&device, format, Some(DEPTH_FORMAT));
 
         Self {
             surface,
@@ -173,6 +186,13 @@ impl Renderer {
             camera_bind_group,
             depth_view,
             meshes: HashMap::new(),
+            highlight: None,
+            highlight_at: None,
+            entities: None,
+            encode_srgb,
+            hud,
+            drawn_indices: 0,
+            drawn_chunks: 0,
         }
     }
 
@@ -187,7 +207,23 @@ impl Renderer {
         self.depth_view = create_depth(&self.device, &self.config);
     }
 
-    /// Replace (or insert) the GPU mesh for one chunk. An empty mesh removes it.
+    pub fn loaded_mesh_count(&self) -> usize {
+        self.meshes.len()
+    }
+
+    /// Apply one frame of streaming output: drop what left the radius, upload
+    /// what finished meshing.
+    pub fn apply_stream(&mut self, dropped: &[ChunkPos], ready: Vec<ChunkMeshData>) {
+        for pos in dropped {
+            self.meshes.remove(pos);
+        }
+        for m in ready {
+            self.upload_mesh(m.pos, &m.verts, &m.indices);
+        }
+    }
+
+    /// Replace (or insert) the GPU mesh for one chunk. An empty mesh removes it,
+    /// which is how a chunk the player hollows out stops being drawn at all.
     pub fn upload_mesh(&mut self, pos: ChunkPos, verts: &[Vertex], indices: &[u32]) {
         if indices.is_empty() {
             self.meshes.remove(&pos);
@@ -224,15 +260,89 @@ impl Renderer {
         );
     }
 
-    pub fn drop_mesh(&mut self, pos: &ChunkPos) {
-        self.meshes.remove(pos);
+    /// Replace the per-frame entity geometry (mobs, projectiles). Empty clears it.
+    pub fn set_entities(&mut self, verts: &[Vertex], indices: &[u32]) {
+        if indices.is_empty() {
+            self.entities = None;
+            return;
+        }
+        let vbuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("entity vbuf"),
+                contents: bytemuck::cast_slice(verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let ibuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("entity ibuf"),
+                contents: bytemuck::cast_slice(indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        self.entities = Some((vbuf, ibuf, indices.len() as u32));
+    }
+
+    /// Build an axis-aligned coloured box. Mobs are drawn as a body and a head,
+    /// which is all the fidelity this project wants.
+    pub fn box_geometry(
+        verts: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        min: glam::Vec3,
+        max: glam::Vec3,
+        color: [f32; 3],
+    ) {
+        push_box_shaded(
+            verts,
+            indices,
+            [min.x, min.y, min.z],
+            [max.x - min.x, max.y - min.y, max.z - min.z],
+            color,
+        );
+    }
+
+    /// Point the selection box at a block, or clear it with `None`. Rebuilds the
+    /// buffers only when the target actually changes, so holding still is free.
+    pub fn set_highlight(&mut self, block: Option<(i32, i32, i32)>) {
+        if self.highlight_at == block {
+            return;
+        }
+        self.highlight_at = block;
+        self.highlight = block.map(|(x, y, z)| {
+            let (verts, indices) = wire_box(x as f32, y as f32, z as f32);
+            let vbuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("highlight vbuf"),
+                    contents: bytemuck::cast_slice(&verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ibuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("highlight ibuf"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+            (vbuf, ibuf, indices.len() as u32)
+        });
     }
 
     /// Draw one frame. Surface loss and resize races are handled here rather than
     /// bubbled up, so the caller only ever asks for a frame.
+    ///
+    /// `sky` is an ordinary sRGB colour; converting it to the linear values the
+    /// shader and the clear both want happens here, in one place.
     pub fn render(&mut self, cam: &Camera, sky: [f32; 3]) {
-        let fog_end = (RENDER_DISTANCE * CHUNK_SIZE_I) as f32;
-        let uniform = CameraUniform::new(cam, sky, fog_end * 0.55, fog_end * 0.98);
+        let far = render_distance_blocks();
+        let sky_linear = srgb_to_linear(sky);
+        let uniform = CameraUniform::new(
+            cam,
+            sky_linear,
+            far * FOG_START_FRAC,
+            far * FOG_END_FRAC,
+            self.encode_srgb,
+        );
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&[uniform]));
 
@@ -240,7 +350,6 @@ impl Renderer {
         let frame = match self.surface.get_current_texture() {
             Cst::Success(f) | Cst::Suboptimal(f) => f,
             Cst::Outdated | Cst::Lost => {
-                // Reconfigure and let the next frame draw.
                 let size = self.size;
                 self.resize(size);
                 return;
@@ -253,11 +362,16 @@ impl Renderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame"),
+            });
 
-        // Chunk meshes are already in world space, so vertices need no per-chunk
-        // transform -- one pipeline, one bind group, one draw call per chunk.
+        // An sRGB swapchain encodes on write, so its clear value must be linear.
+        // A non-sRGB one is written raw, so it must already be encoded.
+        let clear = if self.encode_srgb { sky } else { sky_linear };
         let planes = frustum_planes(cam.view_proj());
+        let mut drawn_indices = 0u32;
+        let mut drawn_chunks = 0u32;
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -268,9 +382,9 @@ impl Renderer {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: sky[0] as f64,
-                            g: sky[1] as f64,
-                            b: sky[2] as f64,
+                            r: clear[0] as f64,
+                            g: clear[1] as f64,
+                            b: clear[2] as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -292,8 +406,9 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            // A chunk's bounding sphere radius: half-diagonal of a 16^3 cube.
-            let radius = (CHUNK_SIZE_I as f32) * 0.8661;
+            // Chunk meshes are already in world space, so there is no per-chunk
+            // transform: one pipeline, one bind group, one draw call per chunk.
+            let radius = (CHUNK_SIZE_I as f32) * 0.8661; // half-diagonal of a 16^3 cube
             for mesh in self.meshes.values() {
                 if !sphere_in_frustum(&planes, mesh.center, radius) {
                     continue;
@@ -301,18 +416,166 @@ impl Renderer {
                 pass.set_vertex_buffer(0, mesh.vbuf.slice(..));
                 pass.set_index_buffer(mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                drawn_indices += mesh.index_count;
+                drawn_chunks += 1;
             }
+
+            if let Some((vbuf, ibuf, count)) = &self.entities {
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..*count, 0, 0..1);
+                drawn_indices += *count;
+            }
+
+            if let Some((vbuf, ibuf, count)) = &self.highlight {
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..*count, 0, 0..1);
+            }
+
+            // The overlay shares this pass so there is no second clear; its own
+            // pipeline has depth testing off, so it always draws on top.
+            self.hud.draw(&self.device, &self.queue, &mut pass);
         }
 
+        self.drawn_indices = drawn_indices;
+        self.drawn_chunks = drawn_chunks;
         self.queue.submit(std::iter::once(encoder.finish()));
         self.queue.present(frame);
     }
 }
 
-fn create_depth(
-    device: &wgpu::Device,
-    config: &wgpu::SurfaceConfiguration,
-) -> wgpu::TextureView {
+fn srgb_to_linear(c: [f32; 3]) -> [f32; 3] {
+    c.map(|v| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    })
+}
+
+/// Twelve thin bars along the edges of a block, slightly inflated so they sit
+/// just outside the surface instead of z-fighting with it.
+fn wire_box(x: f32, y: f32, z: f32) -> (Vec<Vertex>, Vec<u32>) {
+    let e = HIGHLIGHT_INFLATE;
+    let t = 0.02; // bar half-thickness
+    let (lo, hi) = (-e, 1.0 + e);
+    let mut verts = Vec::new();
+    let mut indices = Vec::new();
+
+    // Each bar runs the full length of one axis, pinned at a corner of the other two.
+    let mut bar = |ax: usize, a: f32, b: f32| {
+        let mut min = [0.0f32; 3];
+        let mut max = [0.0f32; 3];
+        let (u, v) = ((ax + 1) % 3, (ax + 2) % 3);
+        min[ax] = lo;
+        max[ax] = hi;
+        min[u] = a - t;
+        max[u] = a + t;
+        min[v] = b - t;
+        max[v] = b + t;
+        push_box(&mut verts, &mut indices, [x, y, z], min, max);
+    };
+    for &a in &[lo, hi] {
+        for &b in &[lo, hi] {
+            bar(0, a, b);
+            bar(1, a, b);
+            bar(2, a, b);
+        }
+    }
+    (verts, indices)
+}
+
+fn push_box(
+    verts: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    min: [f32; 3],
+    max: [f32; 3],
+) {
+    let c = |i: usize, hi: bool| origin[i] + if hi { max[i] } else { min[i] };
+    let p = |xh: bool, yh: bool, zh: bool| [c(0, xh), c(1, yh), c(2, zh)];
+    let corners = [
+        p(false, false, false),
+        p(true, false, false),
+        p(true, false, true),
+        p(false, false, true),
+        p(false, true, false),
+        p(true, true, false),
+        p(true, true, true),
+        p(false, true, true),
+    ];
+    // Counter-clockwise seen from outside, matching the terrain winding.
+    const FACES: [[usize; 4]; 6] = [
+        [4, 7, 6, 5], // +Y
+        [0, 1, 2, 3], // -Y
+        [3, 2, 6, 7], // +Z
+        [1, 0, 4, 5], // -Z
+        [2, 1, 5, 6], // +X
+        [0, 3, 7, 4], // -X
+    ];
+    for f in FACES {
+        let base = verts.len() as u32;
+        for i in f {
+            verts.push(Vertex {
+                pos: corners[i],
+                color: HIGHLIGHT_COLOR,
+                light: 1.0,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+/// A box with per-face shading, so an untextured mob still reads as a solid.
+fn push_box_shaded(
+    verts: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    size: [f32; 3],
+    color: [f32; 3],
+) {
+    let p = |xh: bool, yh: bool, zh: bool| {
+        [
+            origin[0] + if xh { size[0] } else { 0.0 },
+            origin[1] + if yh { size[1] } else { 0.0 },
+            origin[2] + if zh { size[2] } else { 0.0 },
+        ]
+    };
+    let corners = [
+        p(false, false, false),
+        p(true, false, false),
+        p(true, false, true),
+        p(false, false, true),
+        p(false, true, false),
+        p(true, true, false),
+        p(true, true, true),
+        p(false, true, true),
+    ];
+    const FACES: [[usize; 4]; 6] = [
+        [4, 7, 6, 5],
+        [0, 1, 2, 3],
+        [3, 2, 6, 7],
+        [1, 0, 4, 5],
+        [2, 1, 5, 6],
+        [0, 3, 7, 4],
+    ];
+    for (fi, f) in FACES.iter().enumerate() {
+        let light = crate::config::FACE_SHADE[fi];
+        let base = verts.len() as u32;
+        for &i in f {
+            verts.push(Vertex {
+                pos: corners[i],
+                color,
+                light,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+fn create_depth(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth"),
         size: wgpu::Extent3d {
@@ -330,11 +593,11 @@ fn create_depth(
     tex.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-/// Extract the six frustum planes from a view-projection matrix (Gribb/Hartmann).
-/// Each plane is (a, b, c, d) with the normal pointing inward, normalised.
+/// Extract the six frustum planes from a view-projection matrix (Gribb/Hartmann),
+/// normals pointing inward, normalised.
 fn frustum_planes(vp: glam::Mat4) -> [glam::Vec4; 6] {
     let m = vp.to_cols_array_2d();
-    // Row-major access: row r, column c is m[c][r] since glam is column-major.
+    // glam is column-major, so row r of the matrix is m[c][r] across c.
     let row = |r: usize| glam::Vec4::new(m[0][r], m[1][r], m[2][r], m[3][r]);
     let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
     let raw = [
@@ -353,7 +616,7 @@ fn frustum_planes(vp: glam::Mat4) -> [glam::Vec4; 6] {
 }
 
 fn sphere_in_frustum(planes: &[glam::Vec4; 6], center: glam::Vec3, radius: f32) -> bool {
-    planes.iter().all(|p| {
-        p.x * center.x + p.y * center.y + p.z * center.z + p.w >= -radius
-    })
+    planes
+        .iter()
+        .all(|p| p.x * center.x + p.y * center.y + p.z * center.z + p.w >= -radius)
 }
