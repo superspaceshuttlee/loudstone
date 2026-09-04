@@ -19,6 +19,7 @@ mod mesh;
 mod mob;
 mod pathfind;
 mod save;
+mod screenshot;
 mod sound;
 mod world;
 mod worldgen;
@@ -152,6 +153,13 @@ struct App {
     smash_mode: bool,
     chip_timer: f32,
     place_timer: f32,
+    attack_timer: f32,
+    /// Set by `--shot <path>`: capture one frame once the world is loaded, then quit.
+    shot_path: Option<std::path::PathBuf>,
+    /// `--demo`: carve a crater and spawn one of each mob before capturing, so
+    /// the two headline mechanics can be verified in a still frame.
+    demo: bool,
+    shot_countdown: i32,
 
     time_of_day: f32,
     spawn: Vec3,
@@ -221,6 +229,13 @@ impl App {
             smash_mode: false,
             chip_timer: 0.0,
             place_timer: 0.0,
+            attack_timer: 0.0,
+            shot_path: std::env::args()
+                .skip_while(|a| a != "--shot")
+                .nth(1)
+                .map(std::path::PathBuf::from),
+            demo: std::env::args().any(|a| a == "--demo"),
+            shot_countdown: 90,
             time_of_day: 0.0,
             spawn,
             last_frame: Instant::now(),
@@ -270,6 +285,7 @@ impl App {
     fn interact(&mut self, dt: f32) {
         self.chip_timer -= dt;
         self.place_timer -= dt;
+        self.attack_timer -= dt;
 
         let hit = self
             .world
@@ -277,6 +293,33 @@ impl App {
 
         if let Some(gfx) = self.gfx.as_mut() {
             gfx.set_highlight(hit.map(|h| h.block));
+        }
+
+        // A swing hits a mob before it touches the world behind it. Mining a
+        // block the mob is standing in front of would otherwise be impossible.
+        if self.mining && self.attack_timer <= 0.0 {
+            let block_dist = hit.map(|h| h.distance).unwrap_or(REACH);
+            if let Some((id, mob_pos, dist)) = self.mob_under_crosshair(REACH) {
+                if dist <= block_dist {
+                    self.attack_timer = ATTACK_INTERVAL;
+                    let damage = self
+                        .data
+                        .inventory
+                        .selected_item()
+                        .map(|i| i.attack_damage())
+                        .unwrap_or(1.0);
+                    let knock = (mob_pos - self.camera.pos).normalize_or_zero() * KNOCKBACK
+                        + Vec3::Y * KNOCKBACK_LIFT;
+                    self.mobs.damage(id, damage, knock);
+                    self.data.inventory.damage_selected(1);
+                    // Swinging is loud: a fight is not a quiet way to spend time.
+                    self.sound.emit(sound::NoiseEvent {
+                        pos: self.camera.pos,
+                        loudness: NOISE_ATTACK,
+                    });
+                    return;
+                }
+            }
         }
 
         let Some(hit) = hit else { return };
@@ -328,6 +371,75 @@ impl App {
                 self.place_timer = PLACE_INTERVAL;
             }
         }
+    }
+
+    /// Stage the two headline mechanics in front of the camera so a single
+    /// captured frame shows both: a chipped crater, and mobs standing near it.
+    fn run_demo(&mut self) {
+        let eye = self.camera.pos;
+        let fwd = Vec3::new(self.camera.yaw.cos(), 0.0, self.camera.yaw.sin());
+
+        // Carve a hemisphere out of the ground a few blocks ahead.
+        let target = eye + fwd * 7.0;
+        let gy = self.world.surface_y(target.x as i32, target.z as i32) as f32;
+        let centre = Vec3::new(target.x, gy + 0.5, target.z);
+        let r = 2.6f32;
+        let span = r.ceil() as i32 + 1;
+        let (bx, by, bz) = (
+            centre.x.floor() as i32,
+            centre.y.floor() as i32,
+            centre.z.floor() as i32,
+        );
+        for dy in -span..=span {
+            for dz in -span..=span {
+                for dx in -span..=span {
+                    let (x, y, z) = (bx + dx, by + dy, bz + dz);
+                    for sy in 0..SUBVOX {
+                        for sz in 0..SUBVOX {
+                            for sx in 0..SUBVOX {
+                                let p = Vec3::new(
+                                    x as f32 + (sx as f32 + 0.5) / SUBVOX_F,
+                                    y as f32 + (sy as f32 + 0.5) / SUBVOX_F,
+                                    z as f32 + (sz as f32 + 0.5) / SUBVOX_F,
+                                );
+                                if (p - centre).length() <= r {
+                                    self.world.carve(x, y, z, sx, sy, sz);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // One of each mob, arranged across the view.
+        for (i, kind) in MobKind::ALL.iter().enumerate() {
+            let off = (i as f32 - 1.5) * 2.4;
+            let side = Vec3::new(-fwd.z, 0.0, fwd.x) * off;
+            let p = eye + fwd * 11.0 + side;
+            let y = self.world.surface_y(p.x as i32, p.z as i32) as f32 + 1.0;
+            self.mobs.spawn(*kind, Vec3::new(p.x, y, p.z));
+        }
+        println!("[loudstone] demo: crater carved, 4 mobs spawned");
+    }
+
+    /// Nearest mob whose box the aim ray enters, within `reach`.
+    fn mob_under_crosshair(&self, reach: f32) -> Option<(u32, Vec3, f32)> {
+        let origin = self.camera.pos;
+        let dir = self.camera.forward();
+        let mut best: Option<(u32, Vec3, f32)> = None;
+        for m in self.mobs.mobs() {
+            let size = m.kind.size();
+            let half = size.x * 0.5;
+            let min = Vec3::new(m.pos.x - half, m.pos.y, m.pos.z - half);
+            let max = Vec3::new(m.pos.x + half, m.pos.y + size.y, m.pos.z + half);
+            if let Some(t) = ray_box(origin, dir, min, max) {
+                if t <= reach && best.map(|(_, _, bd)| t < bd).unwrap_or(true) {
+                    best = Some((m.id, m.pos + Vec3::Y * size.y * 0.5, t));
+                }
+            }
+        }
+        best
     }
 
     /// Mirror the sub-voxels `chip_sphere` just cleared into the durable edit
@@ -834,6 +946,18 @@ impl ApplicationHandler for App {
                         KeyCode::ShiftLeft => self.input.down = pressed,
                         KeyCode::ControlLeft => self.input.fast = pressed,
                         KeyCode::AltLeft => self.smash_mode = pressed,
+                        KeyCode::F2 if pressed => {
+                            if let Some(gfx) = self.gfx.as_mut() {
+                                let n = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                gfx.request_capture(
+                                    std::path::PathBuf::from("shots")
+                                        .join(format!("loudstone_{n}.png")),
+                                );
+                            }
+                        }
                         KeyCode::KeyF if pressed => {
                             self.player.noclip = !self.player.noclip;
                             if !self.player.noclip {
@@ -890,6 +1014,24 @@ impl ApplicationHandler for App {
                 }
 
                 self.draw();
+
+                // `--shot <path>`: wait for the world to finish streaming, give
+                // it a few frames to settle, capture, and quit.
+                if let Some(path) = self.shot_path.clone() {
+                    if !self.loading {
+                        self.shot_countdown -= 1;
+                        if self.demo && self.shot_countdown == 60 {
+                            self.run_demo();
+                        }
+                        if self.shot_countdown == 0 {
+                            if let Some(gfx) = self.gfx.as_mut() {
+                                gfx.request_capture(path);
+                            }
+                        } else if self.shot_countdown < 0 {
+                            event_loop.exit();
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -900,6 +1042,33 @@ impl ApplicationHandler for App {
             w.request_redraw();
         }
     }
+}
+
+/// Slab-method ray/AABB intersection. Returns the entry distance, or `None`.
+fn ray_box(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let mut tmin = 0.0f32;
+    let mut tmax = f32::INFINITY;
+    for a in 0..3 {
+        let d = dir[a];
+        if d.abs() < 1.0e-8 {
+            // Parallel to this slab: a miss unless the origin is already inside.
+            if origin[a] < min[a] || origin[a] > max[a] {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / d;
+        let (mut t1, mut t2) = ((min[a] - origin[a]) * inv, (max[a] - origin[a]) * inv);
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        tmin = tmin.max(t1);
+        tmax = tmax.min(t2);
+        if tmax < tmin {
+            return None;
+        }
+    }
+    Some(tmin)
 }
 
 fn digit_row(code: KeyCode) -> Option<usize> {
@@ -922,4 +1091,59 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit_box() -> (Vec3, Vec3) {
+        (Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.8, 0.5))
+    }
+
+    #[test]
+    fn a_ray_aimed_at_a_mob_reports_the_entry_distance() {
+        let (min, max) = unit_box();
+        let t = ray_box(Vec3::new(0.0, 1.0, -6.0), Vec3::Z, min, max)
+            .expect("a ray straight at the box must hit it");
+        assert!((t - 5.5).abs() < 1.0e-3, "entry distance was {t}");
+    }
+
+    #[test]
+    fn a_ray_beside_a_mob_misses_it() {
+        let (min, max) = unit_box();
+        assert!(ray_box(Vec3::new(4.0, 1.0, -6.0), Vec3::Z, min, max).is_none());
+    }
+
+    #[test]
+    fn a_ray_over_a_mob_misses_it() {
+        let (min, max) = unit_box();
+        assert!(ray_box(Vec3::new(0.0, 9.0, -6.0), Vec3::Z, min, max).is_none());
+    }
+
+    #[test]
+    fn a_ray_pointing_away_from_a_mob_misses_it() {
+        let (min, max) = unit_box();
+        assert!(ray_box(Vec3::new(0.0, 1.0, -6.0), -Vec3::Z, min, max).is_none());
+    }
+
+    #[test]
+    fn a_ray_parallel_to_a_slab_still_hits_when_it_is_inside_it() {
+        // Travelling along +X at a height and depth that sit inside the box:
+        // the X slab is parallel, so the degenerate branch must not reject it.
+        let (min, max) = unit_box();
+        assert!(ray_box(Vec3::new(-8.0, 1.0, 0.0), Vec3::X, min, max).is_some());
+    }
+
+    #[test]
+    fn daylight_runs_a_full_cycle_from_noon_to_midnight_and_back() {
+        assert_eq!(daylight_at(0.0), 1.0);
+        assert_eq!(daylight_at(DAY_LENGTH * 0.5), 1.0, "still day at half a cycle");
+        // Deep night sits between the two twilight ramps.
+        let night = DAY_LENGTH * (DAY_FRACTION + (1.0 - DAY_FRACTION) * 0.5 + 0.02);
+        assert_eq!(daylight_at(night), 0.0);
+        // And the sky follows it in both directions.
+        assert_eq!(sky_for(1.0), SKY_COLOR);
+        assert_eq!(sky_for(0.0), SKY_NIGHT);
+    }
 }

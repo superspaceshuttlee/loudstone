@@ -179,3 +179,12 @@ pub fn srgb_to_linear3(c: [f32; 3]) -> [f32; 3] {
         srgb_to_linear(c[2]),
     ]
 }
+
+// --- combat ---
+/// Seconds between swings.
+pub const ATTACK_INTERVAL: f32 = 0.40;
+/// Horizontal impulse applied to a mob that is hit.
+pub const KNOCKBACK: f32 = 7.0;
+pub const KNOCKBACK_LIFT: f32 = 3.0;
+/// Swinging is nearly as loud as smashing a block.
+pub const NOISE_ATTACK: f32 = 0.8;

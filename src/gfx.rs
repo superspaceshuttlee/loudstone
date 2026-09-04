@@ -49,6 +49,8 @@ pub struct Renderer {
     pub hud: Hud,
     pub drawn_indices: u32,
     pub drawn_chunks: u32,
+    /// When set, the next rendered frame is copied back and written here.
+    capture_to: Option<std::path::PathBuf>,
 }
 
 impl Renderer {
@@ -87,7 +89,15 @@ impl Renderer {
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .expect("surface is not supported by this adapter");
-        config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        // COPY_SRC lets a finished frame be read back for screenshots. Every
+        // desktop backend supports it; if one ever does not, drop it rather than
+        // failing to start.
+        config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        let caps = surface.get_capabilities(&adapter);
+        if !caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            eprintln!("[loudstone] surface cannot be copied; screenshots disabled");
+            config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        }
         config.present_mode = wgpu::PresentMode::AutoVsync;
         let format = config.format;
         let encode_srgb = !format.is_srgb();
@@ -193,7 +203,13 @@ impl Renderer {
             hud,
             drawn_indices: 0,
             drawn_chunks: 0,
+            capture_to: None,
         }
+    }
+
+    /// Ask for the next frame to be written to disk as a PNG.
+    pub fn request_capture(&mut self, path: std::path::PathBuf) {
+        self.capture_to = Some(path);
     }
 
     pub fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -440,8 +456,114 @@ impl Renderer {
 
         self.drawn_indices = drawn_indices;
         self.drawn_chunks = drawn_chunks;
+
+        // A screenshot is a copy of this same frame, queued into the same
+        // encoder before it is presented.
+        let capture = self.capture_to.take().map(|path| {
+            let (w, h) = (self.config.width, self.config.height);
+            let row = (w * 4).div_ceil(256) * 256; // COPY_BYTES_PER_ROW_ALIGNMENT
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("screenshot readback"),
+                size: (row * h) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &frame.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(row),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            (path, buf, row, w, h)
+        });
+
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        if let Some((path, buf, row, w, h)) = capture {
+            self.write_capture(&path, &buf, row, w, h);
+        }
+
         self.queue.present(frame);
+    }
+}
+
+impl Renderer {
+    /// Map the readback buffer and write it out. Blocks on the GPU, which is
+    /// fine: taking a screenshot is explicitly not on the hot path.
+    fn write_capture(
+        &self,
+        path: &std::path::Path,
+        buf: &wgpu::Buffer,
+        row: u32,
+        w: u32,
+        h: u32,
+    ) {
+        let slice = buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        if self.device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+            eprintln!("[loudstone] screenshot: device poll failed");
+            return;
+        }
+        match rx.recv() {
+            Ok(Ok(())) => {}
+            _ => {
+                eprintln!("[loudstone] screenshot: buffer map failed");
+                return;
+            }
+        }
+
+        let Ok(data) = slice.get_mapped_range() else {
+            eprintln!("[loudstone] screenshot: could not read mapped range");
+            buf.unmap();
+            return;
+        };
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        let bgra = matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        for y in 0..h as usize {
+            let src = &data[y * row as usize..y * row as usize + (w as usize) * 4];
+            let dst = &mut rgba[y * (w as usize) * 4..(y + 1) * (w as usize) * 4];
+            if bgra {
+                for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                    d[0] = s[2];
+                    d[1] = s[1];
+                    d[2] = s[0];
+                    d[3] = 255;
+                }
+            } else {
+                dst.copy_from_slice(src);
+                for px in dst.chunks_exact_mut(4) {
+                    px[3] = 255;
+                }
+            }
+        }
+        drop(data);
+        buf.unmap();
+
+        match crate::screenshot::write_rgba_png(path, w, h, &rgba) {
+            Ok(()) => println!("[loudstone] screenshot written to {}", path.display()),
+            Err(e) => eprintln!("[loudstone] screenshot failed: {e}"),
+        }
     }
 }
 
