@@ -114,11 +114,30 @@ fn sky_for(daylight: f32) -> [f32; 3] {
 
 // ---------------------------------------------------------------------------
 
-/// Which on-screen panel has focus. The cursor is only released for the menu.
+/// Which on-screen panel has focus. The cursor is only released for a panel.
 #[derive(PartialEq, Copy, Clone)]
 enum Ui {
     Playing,
+    /// The player's own 2x2 grid.
     Inventory,
+    /// A crafting table: the full 3x3, which is what every tool needs.
+    Table,
+    /// A specific furnace block in the world.
+    Furnace((i32, i32, i32)),
+}
+
+impl Ui {
+    fn is_panel(self) -> bool {
+        self != Ui::Playing
+    }
+    /// How many crafting cells this panel exposes. Tools are 3x3 recipes, so a
+    /// 2x2 grid can only ever make planks, sticks, torches and the table itself.
+    fn craft_cells(self) -> usize {
+        match self {
+            Ui::Table => 9,
+            _ => 4,
+        }
+    }
 }
 
 struct App {
@@ -141,7 +160,10 @@ struct App {
     replayed: HashSet<ChunkPos>,
 
     ui: Ui,
-    craft_grid: [Option<ItemStack>; 4],
+    craft_grid: [Option<ItemStack>; 9],
+    /// Furnace contents, keyed by the block they belong to, so two furnaces do
+    /// not share one inventory.
+    furnaces: std::collections::HashMap<(i32, i32, i32), crafting::Furnace>,
     /// The stack held by the cursor in the inventory screen.
     carried: Option<ItemStack>,
     cursor: (f32, f32),
@@ -159,6 +181,8 @@ struct App {
     /// `--demo`: carve a crater and spawn one of each mob before capturing, so
     /// the two headline mechanics can be verified in a still frame.
     demo: bool,
+    /// `--ui table` / `--ui furnace`: open that panel before capturing.
+    ui_demo: Option<String>,
     shot_countdown: i32,
 
     time_of_day: f32,
@@ -220,7 +244,8 @@ impl App {
             time_since_save: 0.0,
             replayed: HashSet::new(),
             ui: Ui::Playing,
-            craft_grid: [None; 4],
+            craft_grid: [None; 9],
+            furnaces: std::collections::HashMap::new(),
             carried: None,
             cursor: (0.0, 0.0),
             cursor_locked: false,
@@ -235,6 +260,9 @@ impl App {
                 .nth(1)
                 .map(std::path::PathBuf::from),
             demo: std::env::args().any(|a| a == "--demo"),
+            ui_demo: std::env::args()
+                .skip_while(|a| a != "--ui")
+                .nth(1),
             shot_countdown: 90,
             time_of_day: 0.0,
             spawn,
@@ -358,6 +386,22 @@ impl App {
         }
 
         if self.placing && self.place_timer <= 0.0 {
+            // Right-clicking a workstation opens it rather than placing against it.
+            let aimed = self.world.block_at(bx, by, bz);
+            if aimed == BlockId::CRAFTING_TABLE || aimed == BlockId::FURNACE {
+                self.place_timer = PLACE_INTERVAL;
+                self.placing = false;
+                self.mining = false;
+                self.ui = if aimed == BlockId::FURNACE {
+                    self.furnaces.entry((bx, by, bz)).or_default();
+                    Ui::Furnace((bx, by, bz))
+                } else {
+                    Ui::Table
+                };
+                self.set_cursor_locked(false);
+                return;
+            }
+
             let Some(stack) = self.data.inventory.selected_stack() else {
                 return;
             };
@@ -371,6 +415,21 @@ impl App {
                 self.place_timer = PLACE_INTERVAL;
             }
         }
+    }
+
+    /// Leave whatever panel is open, returning everything on the cursor and in
+    /// the crafting grid to the inventory. Closing a menu must never eat items.
+    fn close_panel(&mut self) {
+        if let Some(st) = self.carried.take() {
+            self.data.inventory.add_item(st.item, st.count as u32);
+        }
+        for cell in self.craft_grid.iter_mut() {
+            if let Some(st) = cell.take() {
+                self.data.inventory.add_item(st.item, st.count as u32);
+            }
+        }
+        self.ui = Ui::Playing;
+        self.set_cursor_locked(true);
     }
 
     /// Stage the two headline mechanics in front of the camera so a single
@@ -421,6 +480,46 @@ impl App {
             self.mobs.spawn(*kind, Vec3::new(p.x, y, p.z));
         }
         println!("[loudstone] demo: crater carved, 4 mobs spawned");
+    }
+
+    /// Stock the inventory and open a panel, so the crafting and furnace screens
+    /// can be checked in a captured frame.
+    fn run_ui_demo(&mut self, which: &str) {
+        for (item, n) in [
+            (ItemId::COBBLESTONE, 32u32),
+            (ItemId::PLANKS, 12),
+            (ItemId::STICK, 8),
+            (ItemId::COAL, 6),
+            (ItemId::RAW_IRON, 4),
+            (ItemId::TORCH, 16),
+            (ItemId::IRON_PICKAXE, 1),
+        ] {
+            self.data.inventory.add_item(item, n);
+        }
+
+        if which == "furnace" {
+            let key = (0, 0, 0);
+            let mut f = crafting::Furnace::new();
+            f.input = Some(ItemStack::new(ItemId::RAW_IRON, 3));
+            f.fuel = Some(ItemStack::new(ItemId::COAL, 2));
+            // Run it far enough to light the fire and part-fill the bar.
+            for _ in 0..300 {
+                f.tick(1.0 / 60.0);
+            }
+            self.furnaces.insert(key, f);
+            self.ui = Ui::Furnace(key);
+        } else {
+            // A stone pickaxe laid out in the 3x3, so the output slot is filled.
+            self.craft_grid = [None; 9];
+            for c in self.craft_grid.iter_mut().take(3) {
+                *c = Some(ItemStack::new(ItemId::COBBLESTONE, 1));
+            }
+            self.craft_grid[4] = Some(ItemStack::new(ItemId::STICK, 1));
+            self.craft_grid[7] = Some(ItemStack::new(ItemId::STICK, 1));
+            self.ui = Ui::Table;
+        }
+        self.cursor = (640.0, 360.0);
+        println!("[loudstone] demo: {which} panel open");
     }
 
     /// Nearest mob whose box the aim ray enters, within `reach`.
@@ -572,6 +671,11 @@ impl App {
             self.respawn();
         }
 
+        // Furnaces keep working whether or not anyone is looking at them.
+        for f in self.furnaces.values_mut() {
+            f.tick(dt);
+        }
+
         // --- autosave ---
         self.time_since_save += dt;
         if save::should_autosave(self.time_since_save) {
@@ -632,9 +736,9 @@ impl App {
             .iter()
             .map(|s| s.map(|st| Slot::new(st.item.color(), st.count as u16)))
             .collect();
-        gfx.hud.hotbar(&slots, self.data.inventory.selected());
-        gfx.hud.health(self.data.player.health, 20.0);
         if self.ui == Ui::Playing {
+            gfx.hud.hotbar(&slots, self.data.inventory.selected());
+            gfx.hud.health(self.data.player.health, 20.0);
             gfx.hud.crosshair();
         }
 
@@ -658,17 +762,23 @@ impl App {
             gfx.hud.text_shadowed(
                 w * 0.5 - 60.0,
                 h * 0.5 - 40.0,
-                2.0,
+                hud::TEXT_SIZE,
                 [1.0, 1.0, 1.0, 1.0],
                 "loading world",
             );
         }
 
-        if self.ui == Ui::Inventory {
-            draw_inventory(
+        if self.ui.is_panel() {
+            let furnace = match self.ui {
+                Ui::Furnace(key) => self.furnaces.get(&key),
+                _ => None,
+            };
+            draw_panel(
                 gfx,
+                self.ui,
                 &self.data.inventory,
                 &self.craft_grid,
+                furnace,
                 self.carried,
                 self.cursor,
             );
@@ -702,28 +812,49 @@ fn slot_rect(w: f32, h: f32, index: usize) -> (f32, f32) {
     (ox + col as f32 * (SLOT_PX + SLOT_GAP), y)
 }
 
-fn craft_rect(w: f32, h: f32, index: usize) -> (f32, f32) {
+/// Crafting cell rect. `cells` is 4 (2x2) or 9 (3x3); the grid stays centred on
+/// the same column either way, so the panel does not jump when it widens.
+fn craft_rect(w: f32, h: f32, index: usize, cells: usize) -> (f32, f32) {
     let (ox, oy) = inv_origin(w, h);
-    let cx = ox + 5.0 * (SLOT_PX + SLOT_GAP);
-    let cy = oy - 2.2 * (SLOT_PX + SLOT_GAP);
+    let step = SLOT_PX + SLOT_GAP;
+    let side = if cells == 9 { 3 } else { 2 };
+    let cx = ox + 4.6 * step - side as f32 * step * 0.5;
+    let cy = oy - (0.4 + side as f32) * step;
     (
-        cx + (index % 2) as f32 * (SLOT_PX + SLOT_GAP),
-        cy + (index / 2) as f32 * (SLOT_PX + SLOT_GAP),
+        cx + (index % side) as f32 * step,
+        cy + (index / side) as f32 * step,
     )
 }
 
-fn craft_output_rect(w: f32, h: f32) -> (f32, f32) {
+fn craft_output_rect(w: f32, h: f32, cells: usize) -> (f32, f32) {
     let (ox, oy) = inv_origin(w, h);
+    let step = SLOT_PX + SLOT_GAP;
+    let side = if cells == 9 { 3 } else { 2 };
     (
-        ox + 7.6 * (SLOT_PX + SLOT_GAP),
-        oy - 1.7 * (SLOT_PX + SLOT_GAP),
+        ox + 6.4 * step,
+        oy - (0.9 + side as f32 * 0.5) * step,
     )
 }
 
-fn draw_inventory(
+/// Furnace slots: 0 input (top), 1 fuel (below it), 2 output (to the right).
+fn furnace_rect(w: f32, h: f32, index: usize) -> (f32, f32) {
+    let (ox, oy) = inv_origin(w, h);
+    let step = SLOT_PX + SLOT_GAP;
+    let cx = ox + 3.2 * step;
+    let cy = oy - 3.4 * step;
+    match index {
+        0 => (cx, cy),
+        1 => (cx, cy + 2.0 * step),
+        _ => (cx + 3.0 * step, cy + step),
+    }
+}
+
+fn draw_panel(
     gfx: &mut gfx::Renderer,
+    ui: Ui,
     inv: &inventory::Inventory,
-    grid: &[Option<ItemStack>; 4],
+    grid: &[Option<ItemStack>; 9],
+    furnace: Option<&crafting::Furnace>,
     carried: Option<ItemStack>,
     cursor: (f32, f32),
 ) {
@@ -731,34 +862,70 @@ fn draw_inventory(
     gfx.hud.screen_dim();
     let (ox, oy) = inv_origin(w, h);
     let gw = 9.0 * SLOT_PX + 8.0 * SLOT_GAP;
-    gfx.hud.panel(
-        ox - 16.0,
-        oy - 3.6 * (SLOT_PX + SLOT_GAP),
-        gw + 32.0,
-        5.6 * (SLOT_PX + SLOT_GAP) + 40.0,
-    );
+    let step = SLOT_PX + SLOT_GAP;
+    gfx.hud.panel(ox - 16.0, oy - 4.8 * step, gw + 32.0, 8.2 * step + 40.0);
 
     let to_slot = |s: Option<ItemStack>| s.map(|st| Slot::new(st.item.color(), st.count as u16));
 
+    // The 36 inventory slots are common to every panel.
     for i in 0..36 {
         let (x, y) = slot_rect(w, h, i);
         gfx.hud
             .slot(x, y, SLOT_PX, to_slot(inv.slot(i)), i == inv.selected());
     }
-    for i in 0..4 {
-        let (x, y) = craft_rect(w, h, i);
-        gfx.hud.slot(x, y, SLOT_PX, to_slot(grid[i]), false);
+
+    let title = match ui {
+        Ui::Furnace(_) => "FURNACE   ore above, fuel below",
+        Ui::Table => "CRAFTING TABLE   3x3",
+        _ => "INVENTORY   2x2, table for tools",
+    };
+
+    match ui {
+        Ui::Furnace(_) => {
+            let f = furnace.expect("furnace panel opened without a furnace");
+            for (i, stack) in [f.input, f.fuel, f.output].iter().enumerate() {
+                let (x, y) = furnace_rect(w, h, i);
+                gfx.hud.slot(x, y, SLOT_PX, to_slot(*stack), false);
+            }
+            // Flame and progress gauges, as plain bars.
+            let (fx, fy) = furnace_rect(w, h, 1);
+            let burn = f.burn_fraction();
+            gfx.hud.rect(
+                fx + SLOT_PX + 8.0,
+                fy + SLOT_PX * (1.0 - burn),
+                10.0,
+                SLOT_PX * burn,
+                [0.95, 0.55, 0.15, 1.0],
+            );
+            let (px, py) = furnace_rect(w, h, 0);
+            let prog = f.progress_fraction();
+            gfx.hud.rect(
+                px + SLOT_PX + 8.0,
+                py + SLOT_PX * 0.45,
+                (2.6 * step - 16.0) * prog,
+                10.0,
+                [0.85, 0.85, 0.9, 1.0],
+            );
+        }
+        _ => {
+            let cells = ui.craft_cells();
+            for i in 0..cells {
+                let (x, y) = craft_rect(w, h, i, cells);
+                gfx.hud.slot(x, y, SLOT_PX, to_slot(grid[i]), false);
+            }
+            let (cx, cy) = craft_output_rect(w, h, cells);
+            gfx.hud.slot(
+                cx,
+                cy,
+                SLOT_PX,
+                to_slot(crafting::resolve(&grid[..cells])),
+                false,
+            );
+        }
     }
-    let (cx, cy) = craft_output_rect(w, h);
+
     gfx.hud
-        .slot(cx, cy, SLOT_PX, to_slot(crafting::resolve(grid)), false);
-    gfx.hud.text_shadowed(
-        ox,
-        oy - 3.3 * (SLOT_PX + SLOT_GAP),
-        1.4,
-        [0.9, 0.9, 0.92, 1.0],
-        "INVENTORY   [E] close   click to move   click output to craft",
-    );
+        .text_shadowed(ox, oy - 4.55 * step, hud::TEXT_SIZE, [0.92, 0.92, 0.95, 1.0], title);
 
     // The carried stack rides the cursor so it is obvious what is in hand.
     if let Some(st) = carried {
@@ -773,8 +940,9 @@ fn draw_inventory(
 }
 
 impl App {
-    /// Click handling for the inventory screen. Returns true if it consumed the click.
-    fn inventory_click(&mut self, right: bool) -> bool {
+    /// Click handling for whichever panel is open. Returns true if it consumed
+    /// the click.
+    fn panel_click(&mut self, right: bool) -> bool {
         let Some(gfx) = self.gfx.as_ref() else {
             return false;
         };
@@ -782,24 +950,47 @@ impl App {
         let (mx, my) = self.cursor;
         let inside = |x: f32, y: f32, s: f32| mx >= x && mx < x + s && my >= y && my < y + s;
 
-        // The crafting output: take the result and spend the ingredients.
-        let (cx, cy) = craft_output_rect(w, h);
-        if inside(cx, cy, SLOT_PX) {
-            if let Some(out) = crafting::craft(&mut self.craft_grid) {
-                let spilled = self.data.inventory.add_item(out.item, out.count as u32);
-                if spilled > 0 {
-                    // No room: put it in the hand instead of destroying it.
-                    self.carried = Some(ItemStack::new(out.item, spilled as u8));
+        if let Ui::Furnace(key) = self.ui {
+            if let Some(mut f) = self.furnaces.get(&key).cloned() {
+                for i in 0..3 {
+                    let (x, y) = furnace_rect(w, h, i);
+                    if !inside(x, y, SLOT_PX) {
+                        continue;
+                    }
+                    if i == 2 {
+                        // The output slot only ever gives; it never accepts.
+                        if let Some(out) = f.take_output() {
+                            let spilled = self.data.inventory.add_item(out.item, out.count as u32);
+                            if spilled > 0 {
+                                self.carried = Some(ItemStack::new(out.item, spilled as u8));
+                            }
+                        }
+                    } else {
+                        let cell = if i == 0 { &mut f.input } else { &mut f.fuel };
+                        swap_carried(&mut self.carried, cell, right);
+                    }
+                    self.furnaces.insert(key, f);
+                    return true;
                 }
             }
-            return true;
-        }
-
-        for i in 0..4 {
-            let (x, y) = craft_rect(w, h, i);
-            if inside(x, y, SLOT_PX) {
-                swap_carried(&mut self.carried, &mut self.craft_grid[i], right);
+        } else {
+            let cells = self.ui.craft_cells();
+            let (cx, cy) = craft_output_rect(w, h, cells);
+            if inside(cx, cy, SLOT_PX) {
+                if let Some(out) = crafting::craft(&mut self.craft_grid[..cells]) {
+                    let spilled = self.data.inventory.add_item(out.item, out.count as u32);
+                    if spilled > 0 {
+                        self.carried = Some(ItemStack::new(out.item, spilled as u8));
+                    }
+                }
                 return true;
+            }
+            for i in 0..cells {
+                let (x, y) = craft_rect(w, h, i, cells);
+                if inside(x, y, SLOT_PX) {
+                    swap_carried(&mut self.carried, &mut self.craft_grid[i], right);
+                    return true;
+                }
             }
         }
 
@@ -917,9 +1108,9 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
-                if self.ui == Ui::Inventory {
+                if self.ui.is_panel() {
                     if pressed {
-                        self.inventory_click(button == MouseButton::Right);
+                        self.panel_click(button == MouseButton::Right);
                     }
                     return;
                 }
@@ -965,19 +1156,21 @@ impl ApplicationHandler for App {
                             }
                         }
                         KeyCode::KeyE if pressed => {
-                            self.ui = if self.ui == Ui::Inventory {
-                                self.set_cursor_locked(true);
-                                Ui::Playing
+                            if self.ui.is_panel() {
+                                self.close_panel();
                             } else {
-                                self.set_cursor_locked(false);
                                 self.mining = false;
                                 self.placing = false;
-                                Ui::Inventory
-                            };
+                                self.ui = Ui::Inventory;
+                                self.set_cursor_locked(false);
+                            }
                         }
                         KeyCode::Escape if pressed => {
-                            self.ui = Ui::Playing;
-                            self.set_cursor_locked(false);
+                            if self.ui.is_panel() {
+                                self.close_panel();
+                            } else {
+                                self.set_cursor_locked(false);
+                            }
                         }
                         _ => {
                             if pressed {
@@ -1020,8 +1213,13 @@ impl ApplicationHandler for App {
                 if let Some(path) = self.shot_path.clone() {
                     if !self.loading {
                         self.shot_countdown -= 1;
-                        if self.demo && self.shot_countdown == 60 {
-                            self.run_demo();
+                        if self.shot_countdown == 60 {
+                            if self.demo {
+                                self.run_demo();
+                            }
+                            if let Some(which) = self.ui_demo.clone() {
+                                self.run_ui_demo(&which);
+                            }
                         }
                         if self.shot_countdown == 0 {
                             if let Some(gfx) = self.gfx.as_mut() {
@@ -1145,5 +1343,122 @@ mod tests {
         // And the sky follows it in both directions.
         assert_eq!(sky_for(1.0), SKY_COLOR);
         assert_eq!(sky_for(0.0), SKY_NIGHT);
+    }
+    // -----------------------------------------------------------------------
+    // The Phase 4 acceptance criterion, as an actual test: start from nothing,
+    // reach a stone pickaxe, then smelt iron. This is the whole progression the
+    // 2x2-only build silently could not do -- every tool is a 3x3 recipe, so
+    // without a crafting table panel the chain dead-ends at planks and sticks.
+    // -----------------------------------------------------------------------
+
+    fn stack(item: ItemId, n: u8) -> Option<ItemStack> {
+        Some(ItemStack::new(item, n))
+    }
+
+    #[test]
+    fn a_2x2_grid_cannot_make_a_pickaxe_but_a_3x3_can() {
+        // Every tool needs three across the top and two sticks down the middle,
+        // so it cannot fit in the player's own 2x2 grid at any offset.
+        assert_eq!(Ui::Inventory.craft_cells(), 4);
+        assert_eq!(Ui::Table.craft_cells(), 9);
+
+        let two = [
+            stack(ItemId::COBBLESTONE, 1),
+            stack(ItemId::COBBLESTONE, 1),
+            stack(ItemId::STICK, 1),
+            stack(ItemId::STICK, 1),
+        ];
+        assert!(
+            crafting::resolve(&two).is_none(),
+            "a pickaxe must not be craftable in the 2x2 grid"
+        );
+
+        let three = [
+            stack(ItemId::COBBLESTONE, 1),
+            stack(ItemId::COBBLESTONE, 1),
+            stack(ItemId::COBBLESTONE, 1),
+            None,
+            stack(ItemId::STICK, 1),
+            None,
+            None,
+            stack(ItemId::STICK, 1),
+            None,
+        ];
+        let out = crafting::resolve(&three).expect("3x3 must resolve a stone pickaxe");
+        assert_eq!(out.item, ItemId::STONE_PICKAXE);
+    }
+
+    #[test]
+    fn the_full_progression_from_bare_hands_to_an_iron_ingot() {
+        let mut inv = inventory::Inventory::new();
+
+        // Punch a tree: wood -> planks -> sticks, both 2x2 recipes.
+        inv.add_item(ItemId::WOOD, 2);
+        let mut g = [None; 9];
+        g[0] = stack(ItemId::WOOD, 1);
+        let planks = crafting::craft(&mut g[..4]).expect("wood makes planks");
+        assert_eq!(planks.item, ItemId::PLANKS);
+        inv.add_item(planks.item, planks.count as u32);
+
+        // A crafting table is itself a 2x2 recipe, which is what unlocks 3x3.
+        let mut g = [None; 9];
+        for c in g.iter_mut().take(4) {
+            *c = stack(ItemId::PLANKS, 1);
+        }
+        let table = crafting::craft(&mut g[..4]).expect("four planks make a table");
+        assert_eq!(table.item, ItemId::CRAFTING_TABLE);
+
+        // At the table: a stone pickaxe.
+        let mut g = [None; 9];
+        for c in g.iter_mut().take(3) {
+            *c = stack(ItemId::COBBLESTONE, 1);
+        }
+        g[4] = stack(ItemId::STICK, 1);
+        g[7] = stack(ItemId::STICK, 1);
+        let pick = crafting::craft(&mut g[..9]).expect("the table makes a stone pickaxe");
+        assert_eq!(pick.item, ItemId::STONE_PICKAXE);
+
+        // That pickaxe is exactly what iron ore requires -- a wooden one is not.
+        assert!(item::can_harvest(Some(ItemId::STONE_PICKAXE), BlockId::IRON_ORE));
+        assert!(!item::can_harvest(Some(ItemId::WOODEN_PICKAXE), BlockId::IRON_ORE));
+        assert_eq!(
+            item::mining_drop(Some(ItemId::STONE_PICKAXE), BlockId::IRON_ORE),
+            Some(ItemId::RAW_IRON)
+        );
+
+        // Smelt it. Coal is the fuel; the furnace ticks on its own.
+        let mut f = crafting::Furnace::new();
+        f.input = stack(ItemId::RAW_IRON, 1);
+        f.fuel = stack(ItemId::COAL, 1);
+        for _ in 0..1200 {
+            f.tick(1.0 / 60.0);
+        }
+        let ingot = f.take_output().expect("raw iron smelts into an ingot");
+        assert_eq!(ingot.item, ItemId::IRON_INGOT);
+
+        // And an iron pickaxe is what gets diamond, closing the chain.
+        let mut g = [None; 9];
+        for c in g.iter_mut().take(3) {
+            *c = stack(ItemId::IRON_INGOT, 1);
+        }
+        g[4] = stack(ItemId::STICK, 1);
+        g[7] = stack(ItemId::STICK, 1);
+        let iron_pick = crafting::craft(&mut g[..9]).expect("ingots make an iron pickaxe");
+        assert_eq!(iron_pick.item, ItemId::IRON_PICKAXE);
+        assert!(item::can_harvest(Some(ItemId::IRON_PICKAXE), BlockId::DIAMOND_ORE));
+        assert!(!item::can_harvest(Some(ItemId::STONE_PICKAXE), BlockId::DIAMOND_ORE));
+
+        let _ = inv.slot(0);
+    }
+
+    #[test]
+    fn a_furnace_will_not_burn_fuel_with_nothing_to_smelt() {
+        let mut f = crafting::Furnace::new();
+        f.fuel = stack(ItemId::COAL, 1);
+        for _ in 0..600 {
+            f.tick(1.0 / 60.0);
+        }
+        assert!(!f.is_burning(), "an idle furnace must not waste its fuel");
+        assert_eq!(f.fuel.map(|s| s.count), Some(1));
     }
 }
