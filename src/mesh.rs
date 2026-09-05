@@ -19,6 +19,7 @@
 use crate::block::BlockId;
 use crate::chunk::{local_index, Chunk, ChunkPos, SubMask};
 use crate::config::{AO_STRENGTH, CARVE_SHADE, CHUNK_SIZE, FACE_SHADE, SUBVOX};
+use crate::light;
 use crate::worldgen::TerrainGen;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,10 +66,18 @@ pub fn neighbor_index(dx: i32, dy: i32, dz: i32) -> usize {
 pub struct Neighborhood {
     /// Padded block ids, indexed by [(y*PAD + z)*PAD + x] with a +1 offset.
     blocks: Vec<BlockId>,
+    /// Packed sky/block light, in the same padded layout as `blocks`. The light
+    /// travels in the snapshot exactly like the block ids do, so a mesh worker
+    /// never has to reach back into the live world for it.
+    light: Vec<u8>,
     /// Sub-voxel masks for damaged blocks in the *centre* chunk only.
     damage: HashMap<u16, SubMask>,
     /// Damaged blocks do not fully occlude their neighbours' faces.
     damaged_pad: Vec<bool>,
+    /// Levels the current time of day takes off the sky channel. Baked in here
+    /// because the vertex format carries one combined float and the renderer's
+    /// uniform block is not this module's to extend -- see the integration note.
+    sky_subtract: f32,
     pub pos: ChunkPos,
     pub origin: (i32, i32, i32),
 }
@@ -87,9 +96,11 @@ impl Neighborhood {
         pos: ChunkPos,
         neighbors: &[Option<Arc<Chunk>>; NEIGHBOR_COUNT],
         terrain: &TerrainGen,
+        sky_subtract: u8,
     ) -> Self {
         let origin = pos.origin();
         let mut blocks = vec![BlockId::AIR; PAD * PAD * PAD];
+        let mut light = vec![0u8; PAD * PAD * PAD];
         let mut damaged_pad = vec![false; PAD * PAD * PAD];
 
         // Surface heights for the 18x18 footprint, computed once and shared by
@@ -132,17 +143,18 @@ impl Neighborhood {
                                 lz.rem_euclid(cs) as usize,
                             );
                             blocks[i] = c.get(ix, iy, iz);
+                            light[i] = c.light(ix, iy, iz);
                             if c.has_damage() {
                                 damaged_pad[i] = c.mask(ix, iy, iz).is_some();
                             }
                         }
                         None => {
-                            blocks[i] = terrain.block_at_surface(
-                                wx,
-                                wy,
-                                wz,
-                                heights[pz * PAD + px],
-                            );
+                            let surface = heights[pz * PAD + px];
+                            blocks[i] = terrain.block_at_surface(wx, wy, wz, surface);
+                            // Must match what `light::seed_chunk` would produce
+                            // for this column, or every seam against a chunk
+                            // that has not streamed in yet shows a light step.
+                            light[i] = light::pack(0, light::fallback_sky(surface, wy));
                         }
                     }
                 }
@@ -156,8 +168,10 @@ impl Neighborhood {
 
         Self {
             blocks,
+            light,
             damage,
             damaged_pad,
+            sky_subtract: sky_subtract as f32,
             pos,
             origin,
         }
@@ -169,7 +183,7 @@ impl Neighborhood {
         let pos = chunk.pos;
         let mut n: [Option<Arc<Chunk>>; NEIGHBOR_COUNT] = std::array::from_fn(|_| None);
         n[neighbor_index(0, 0, 0)] = Some(chunk);
-        Self::build(pos, &n, terrain)
+        Self::build(pos, &n, terrain, 0)
     }
 
     #[inline]
@@ -182,6 +196,59 @@ impl Neighborhood {
     fn occludes(&self, x: i32, y: i32, z: i32) -> bool {
         let i = pad_index((x + 1) as usize, (y + 1) as usize, (z + 1) as usize);
         self.blocks[i].is_opaque() && !self.damaged_pad[i]
+    }
+
+    /// The block at a chunk-local coordinate, valid over -1..=CHUNK_SIZE.
+    #[inline]
+    fn block_at_local(&self, x: i32, y: i32, z: i32) -> BlockId {
+        self.blocks[pad_index((x + 1) as usize, (y + 1) as usize, (z + 1) as usize)]
+    }
+
+    /// Packed light at a chunk-local coordinate, valid over -1..=CHUNK_SIZE.
+    #[inline]
+    fn light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+        self.light[pad_index((x + 1) as usize, (y + 1) as usize, (z + 1) as usize)]
+    }
+
+    /// Whether a cell contributes to the smooth-lighting average. Blocks that
+    /// stop light hold no light of their own, so including them would drag every
+    /// corner next to a wall towards black.
+    #[inline]
+    fn transmits(&self, x: i32, y: i32, z: i32) -> bool {
+        !light::blocks_light(self.at(x, y, z))
+    }
+
+    /// Brightness at one face corner, averaged over the (up to four) cells on
+    /// the lit side of the face that touch it. This is Minecraft's smooth
+    /// lighting: it is what turns hard per-block light steps into a gradient.
+    fn corner_light(&self, samples: [[i32; 3]; 4]) -> f32 {
+        let mut block = 0.0f32;
+        let mut sky = 0.0f32;
+        let mut n = 0.0f32;
+        for s in samples {
+            if !self.transmits(s[0], s[1], s[2]) {
+                continue;
+            }
+            let p = self.light_at(s[0], s[1], s[2]);
+            block += light::block_of(p) as f32;
+            sky += light::sky_of(p) as f32;
+            n += 1.0;
+        }
+        if n == 0.0 {
+            // Fully boxed in: the face is looking into solid rock.
+            return light::vertex_light(0.0, 0.0, self.sky_subtract);
+        }
+        light::vertex_light(block / n, sky / n, self.sky_subtract)
+    }
+
+    /// Flat light for one cell, used where smoothing is not worth the cost.
+    fn flat_light(&self, x: i32, y: i32, z: i32) -> f32 {
+        let p = self.light_at(x, y, z);
+        light::vertex_light(
+            light::block_of(p) as f32,
+            light::sky_of(p) as f32,
+            self.sky_subtract,
+        )
     }
 }
 
@@ -307,8 +374,18 @@ fn emit_full_block(
 ) {
     let color = id.color();
     let (ox, oy, oz) = nb.origin;
+    // Leaves, water and plants are non-opaque, so they do not occlude their
+    // neighbours -- but two of the SAME non-opaque block share an invisible
+    // interior face, and emitting it is pure waste. Without this a tree canopy
+    // meshes every face of every leaf block it contains, which is where the
+    // overwhelming majority of this world's triangles were going.
+    let self_culls = !id.is_opaque();
     for (f, n) in FACE_NORMALS.iter().enumerate() {
-        if nb.occludes(x + n[0], y + n[1], z + n[2]) {
+        let (nx, ny, nz) = (x + n[0], y + n[1], z + n[2]);
+        if nb.occludes(nx, ny, nz) {
+            continue;
+        }
+        if self_culls && nb.block_at_local(nx, ny, nz) == id {
             continue;
         }
         let shade = FACE_SHADE[f];
@@ -326,14 +403,21 @@ fn emit_full_block(
             // Which side of each tangent axis this corner sits on.
             let du = if dot_sign(*c, t) { 1 } else { -1 };
             let dv = if dot_sign(*c, b) { 1 } else { -1 };
-            let s1 = nb.occludes(np[0] + t[0] * du, np[1] + t[1] * du, np[2] + t[2] * du);
-            let s2 = nb.occludes(np[0] + b[0] * dv, np[1] + b[1] * dv, np[2] + b[2] * dv);
-            let cn = nb.occludes(
+            let side1 = [np[0] + t[0] * du, np[1] + t[1] * du, np[2] + t[2] * du];
+            let side2 = [np[0] + b[0] * dv, np[1] + b[1] * dv, np[2] + b[2] * dv];
+            let diag = [
                 np[0] + t[0] * du + b[0] * dv,
                 np[1] + t[1] * du + b[1] * dv,
                 np[2] + t[2] * du + b[2] * dv,
-            );
-            light[i] = shade * corner_ao(s1, s2, cn);
+            ];
+            let s1 = nb.occludes(side1[0], side1[1], side1[2]);
+            let s2 = nb.occludes(side2[0], side2[1], side2[2]);
+            let cn = nb.occludes(diag[0], diag[1], diag[2]);
+            // The same four cells the AO term samples also carry the light that
+            // reaches this corner, so smoothing costs no extra lookups worth
+            // naming: face shade x ambient occlusion x smoothed sky/block light.
+            let lit = nb.corner_light([np, side1, side2, diag]);
+            light[i] = shade * corner_ao(s1, s2, cn) * lit;
         }
         push_quad(verts, indices, corners, color, light);
     }
@@ -365,6 +449,17 @@ fn emit_subvoxel_block(
     let n = SUBVOX as i32;
     let (ox, oy, oz) = nb.origin;
 
+    // A carved block still stops light (see the module docs on `light.rs`), so
+    // it holds none of its own. Its faces are lit from the neighbouring cells:
+    // an outward face takes the cell it looks at, and a face inside the crater
+    // takes the brightest cell adjacent to the block, which is what makes a
+    // crater in a lit wall read as lit rather than as a black hole.
+    let mut face_light = [0.0f32; 6];
+    for (f, nrm) in FACE_NORMALS.iter().enumerate() {
+        face_light[f] = nb.flat_light(x + nrm[0], y + nrm[1], z + nrm[2]);
+    }
+    let interior_light = face_light.iter().copied().fold(0.0f32, f32::max);
+
     for sy in 0..n {
         for sz in 0..n {
             for sx in 0..n {
@@ -395,7 +490,8 @@ fn emit_subvoxel_block(
                     }
                     // Carved surfaces take a flat shade; per-sub-voxel AO is not
                     // worth the cost at this scale.
-                    let l = FACE_SHADE[f] * CARVE_SHADE;
+                    let lit = if inside { interior_light } else { face_light[f] };
+                    let l = FACE_SHADE[f] * CARVE_SHADE * lit;
                     push_quad(verts, indices, corners, color, [l, l, l, l]);
                 }
             }
@@ -469,7 +565,7 @@ mod tests {
                 }
             }
         }
-        let nb = Neighborhood::build(pos, &n, &sky_terrain());
+        let nb = Neighborhood::build(pos, &n, &sky_terrain(), 0);
         let (verts, indices) = mesh_chunk(&nb);
         assert_eq!(verts.len(), 0, "buried chunk emitted geometry");
         assert_eq!(indices.len(), 0);
@@ -540,7 +636,7 @@ mod tests {
                 }
             }
         }
-        let nb2 = Neighborhood::build(pos, &n, &terrain);
+        let nb2 = Neighborhood::build(pos, &n, &terrain, 0);
         let (verts_present, _) = mesh_chunk(&nb2);
         assert_eq!(
             verts_absent.len(),

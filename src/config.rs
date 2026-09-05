@@ -180,6 +180,37 @@ pub fn srgb_to_linear3(c: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// Lighting
+//
+// Two channels, both 0..=15, packed into one byte per block. Block light comes
+// from torches and does not care what time it is; sky light comes from open sky
+// and is dimmed by the day cycle. They are combined with `max`, never summed,
+// which is what makes a torch read as a torch rather than as a general brightener.
+// ---------------------------------------------------------------------------
+
+/// Maximum value of either light channel. Four bits, so this cannot exceed 15.
+pub const MAX_LIGHT: u8 = 15;
+/// Block light a torch emits. One below the maximum, so a torch is visibly a
+/// local source rather than a small sun.
+pub const TORCH_LIGHT: u8 = 14;
+/// Shape of the level-to-brightness curve. Above 1.0 the light falls off faster
+/// than the level does, which is what makes a torch read as a pool with an edge
+/// rather than as a soft wash. Dialed in against screenshots: at 1.4 an unlit
+/// cave is genuinely dark, a torch is bright for about four blocks, and open
+/// ground at night sits around a fifth of full daylight.
+pub const LIGHT_GAMMA: f32 = 1.4;
+/// Brightness a completely unlit surface keeps. Not zero: a pitch-black cave
+/// wall is indistinguishable from the void behind it, which reads as a bug.
+pub const LIGHT_AMBIENT: f32 = 0.07;
+/// How many levels midnight takes off the sky channel. 11 leaves open ground at
+/// an effective level of 4 at night: navigable, but worth carrying a torch.
+pub const NIGHT_SKY_SUBTRACT: u8 = 11;
+/// Chunks re-meshed per frame when the day cycle crosses a sky-subtract step.
+/// Light is baked into vertices, so a step change means the resident world has
+/// to be rebuilt -- but slowly, in the background, off the frame's critical path.
+pub const RELIGHT_CHUNKS_PER_FRAME: usize = 16;
+
 // --- combat ---
 /// Seconds between swings.
 pub const ATTACK_INTERVAL: f32 = 0.40;

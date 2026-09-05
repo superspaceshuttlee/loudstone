@@ -227,6 +227,11 @@ impl Renderer {
         self.meshes.len()
     }
 
+    /// Total indices resident on the GPU, for diagnosing geometry blowups.
+    pub fn total_indices(&self) -> u64 {
+        self.meshes.values().map(|m| m.index_count as u64).sum()
+    }
+
     /// Apply one frame of streaming output: drop what left the radius, upload
     /// what finished meshing.
     pub fn apply_stream(&mut self, dropped: &[ChunkPos], ready: Vec<ChunkMeshData>) {

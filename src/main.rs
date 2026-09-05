@@ -11,10 +11,12 @@ mod camera;
 mod chunk;
 mod config;
 mod crafting;
+mod gauntlet;
 mod gfx;
 mod hud;
 mod inventory;
 mod item;
+mod light;
 mod mesh;
 mod mob;
 mod pathfind;
@@ -183,6 +185,14 @@ struct App {
     demo: bool,
     /// `--ui table` / `--ui furnace`: open that panel before capturing.
     ui_demo: Option<String>,
+    /// `--gauntlet`: a robot plays the game and reports what broke.
+    gauntlet: Option<gauntlet::Gauntlet>,
+    /// Multiplier on the day/night clock, driven by the gauntlet.
+    time_scale: f32,
+    // Monotonic counters the gauntlet watches to tell whether anything happened.
+    stat_carved: u64,
+    stat_broken: u64,
+    stat_placed: u64,
     shot_countdown: i32,
 
     time_of_day: f32,
@@ -193,6 +203,9 @@ struct App {
     fps_frames: u32,
     /// Set while the streamer is still filling the initial radius.
     loading: bool,
+    gauntlet_done: bool,
+    gauntlet_stocked: bool,
+    load_frames: u32,
     start: Instant,
 }
 
@@ -263,6 +276,13 @@ impl App {
             ui_demo: std::env::args()
                 .skip_while(|a| a != "--ui")
                 .nth(1),
+            gauntlet: std::env::args()
+                .any(|a| a == "--gauntlet")
+                .then(gauntlet::Gauntlet::new),
+            time_scale: 1.0,
+            stat_carved: 0,
+            stat_broken: 0,
+            stat_placed: 0,
             shot_countdown: 90,
             time_of_day: 0.0,
             spawn,
@@ -271,6 +291,9 @@ impl App {
             fps_accum: 0.0,
             fps_frames: 0,
             loading: true,
+            gauntlet_done: false,
+            gauntlet_stocked: false,
+            load_frames: 0,
             start: Instant::now(),
         }
     }
@@ -364,6 +387,7 @@ impl App {
                     if self.chip_timer <= 0.0 {
                         self.chip_timer = SMASH_CHARGE;
                         if let Some(broken) = self.world.smash_block(bx, by, bz) {
+                            self.stat_broken += 1;
                             self.data.edits.note_set_block(bx, by, bz, BlockId::AIR);
                             self.grant_drop(tool, broken);
                         }
@@ -375,7 +399,7 @@ impl App {
                     self.chip_timer = CHIP_INTERVAL * target.hardness() / speed.max(0.01);
 
                     let before = self.world.block_at(bx, by, bz);
-                    self.world.chip_sphere(&hit, CHIP_RADIUS);
+                    self.stat_carved += self.world.chip_sphere(&hit, CHIP_RADIUS) as u64;
                     // Record what was carved so it survives streaming and saving.
                     self.note_carves(&hit);
                     if self.world.block_at(bx, by, bz).is_air() && !before.is_air() {
@@ -409,6 +433,7 @@ impl App {
             let (px, py, pz) = hit.adjacent();
             let (min, max) = self.player.aabb();
             if self.world.place_block(px, py, pz, id, min, max) {
+                self.stat_placed += 1;
                 self.data.edits.note_set_block(px, py, pz, id);
                 let sel = self.data.inventory.selected();
                 self.data.inventory.take_from_slot(sel, 1);
@@ -480,6 +505,93 @@ impl App {
             self.mobs.spawn(*kind, Vec3::new(p.x, y, p.z));
         }
         println!("[loudstone] demo: crater carved, 4 mobs spawned");
+    }
+
+    /// Sample the game for the gauntlet, hand it the frame, and apply whatever
+    /// it decides to do. Returns a screenshot name when a step asks for one.
+    fn drive_gauntlet(&mut self, dt: f32) -> Option<&'static str> {
+        if self.gauntlet.is_none() {
+            return None;
+        }
+        // Still streaming: hold the robot at the gate so a slow first load is
+        // not mistaken for the player refusing to move.
+        if self.loading {
+            return None;
+        }
+        if !self.gauntlet_stocked {
+            // A robot with empty pockets cannot test placing, and an empty hand
+            // mines at the slowest possible rate.
+            self.gauntlet_stocked = true;
+            self.data.inventory.add_item(ItemId::COBBLESTONE, 64);
+            self.data.inventory.add_item(ItemId::TORCH, 16);
+            self.data.inventory.add_item(ItemId::STONE_PICKAXE, 1);
+        }
+
+        let (min, max) = self.player.aabb();
+        let nearest_hostile = self
+            .mobs
+            .mobs()
+            .iter()
+            .filter(|m| m.kind.is_hostile())
+            .map(|m| (m.pos - self.player.pos).length())
+            .fold(f32::INFINITY, f32::min);
+
+        let probe = gauntlet::Probe {
+            pos: self.player.pos,
+            on_ground: self.player.on_ground,
+            health: self.data.player.health,
+            fps: self.fps,
+            chunks: self.world.chunks.len(),
+            mobs: self.mobs.mobs().len(),
+            inside_solid: self.world.box_collides(min, max),
+            daylight: daylight_at(self.time_of_day),
+            nearest_hostile: nearest_hostile.is_finite().then_some(nearest_hostile),
+            carved: self.stat_carved,
+            broken: self.stat_broken,
+            placed: self.stat_placed,
+        };
+
+        let g = self.gauntlet.as_mut().unwrap();
+        let frame = g.tick(dt, &probe);
+
+        let Some(frame) = frame else {
+            // Finished, or aborted. Report and quit.
+            let g = self.gauntlet.take().unwrap();
+            println!("\n[gauntlet] ---- report ----");
+            if g.findings.is_empty() {
+                println!("[gauntlet] {} steps, no findings", g.total_steps());
+            } else {
+                println!("[gauntlet] {} findings:", g.findings.len());
+                for f in &g.findings {
+                    println!("[gauntlet]   {}: {}", f.step, f.what);
+                }
+            }
+            self.gauntlet_done = true;
+            return None;
+        };
+
+        self.input = frame.input;
+        self.mining = frame.mine;
+        self.smash_mode = frame.smash;
+        self.placing = frame.place;
+        self.time_scale = frame.time_scale;
+        self.camera.yaw += frame.yaw_rate * dt;
+        if let Some(pitch) = frame.look_pitch {
+            self.camera.pitch = pitch;
+        }
+        if let Some(frac) = frame.set_time_frac {
+            self.time_of_day = frac * DAY_LENGTH;
+        }
+
+        for i in 0..frame.spawn_hostiles {
+            let a = i as f32 * std::f32::consts::TAU / frame.spawn_hostiles.max(1) as f32;
+            let d = 9.0;
+            let p = self.player.pos + Vec3::new(a.cos() * d, 0.0, a.sin() * d);
+            let y = self.world.surface_y(p.x as i32, p.z as i32) as f32 + 1.0;
+            let kind = MobKind::HOSTILES[i % MobKind::HOSTILES.len()];
+            self.mobs.spawn(kind, Vec3::new(p.x, y, p.z));
+        }
+        frame.shot
     }
 
     /// Stock the inventory and open a panel, so the crafting and furnace screens
@@ -591,8 +703,13 @@ impl App {
 
     /// One simulation step.
     fn update(&mut self, dt: f32) {
-        self.time_of_day += dt;
+        self.time_of_day += dt * self.time_scale;
         let daylight = daylight_at(self.time_of_day);
+        // Sky light is baked into the chunk meshes, so the world has to be told
+        // what time it is or night only changes the sky colour and the ground
+        // stays lit as if at noon. This is cheap: it does nothing until the
+        // daylight crosses one of twelve steps, then queues a background remesh.
+        self.world.set_daylight(daylight);
 
         // --- movement, then the camera rides the player's eyes ---
         if self.ui == Ui::Playing {
@@ -624,13 +741,30 @@ impl App {
             self.data.edits = edits;
         }
 
+        if self.loading {
+            self.load_frames += 1;
+        }
         if self.loading && self.world.is_idle() {
             self.loading = false;
+            let st = self.world.stats;
             println!(
-                "[loudstone] world ready in {:.2}s ({} chunks)",
+                "[loudstone] world ready in {:.2}s -- {} chunks resident, {} generated, {} meshed, over {} frames",
                 self.start.elapsed().as_secs_f32(),
-                self.world.chunks.len()
+                self.world.chunks.len(),
+                st.chunks_generated,
+                st.chunks_meshed,
+                self.load_frames
             );
+            if let Some(g) = self.gfx.as_ref() {
+                let idx = g.total_indices();
+                println!(
+                    "[loudstone] geometry: {:.1}M indices, {:.1}M triangles, {:.0} tris/chunk, ~{:.0} MB vertex data",
+                    idx as f64 / 1.0e6,
+                    idx as f64 / 3.0e6,
+                    idx as f64 / 3.0 / g.loaded_mesh_count().max(1) as f64,
+                    idx as f64 / 6.0 * 4.0 * 28.0 / 1.0e6,
+                );
+            }
         }
 
         if self.ui == Ui::Playing {
@@ -1188,7 +1322,18 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
 
+                let gauntlet_shot = self.drive_gauntlet(dt);
                 self.update(dt);
+                if let Some(name) = gauntlet_shot {
+                    if let Some(gfx) = self.gfx.as_mut() {
+                        gfx.request_capture(
+                            std::path::PathBuf::from("shots").join(format!("gauntlet_{name}.png")),
+                        );
+                    }
+                }
+                if self.gauntlet_done {
+                    event_loop.exit();
+                }
 
                 self.fps_accum += dt;
                 self.fps_frames += 1;
@@ -1460,5 +1605,17 @@ mod tests {
         }
         assert!(!f.is_burning(), "an idle furnace must not waste its fuel");
         assert_eq!(f.fuel.map(|s| s.count), Some(1));
+    }
+    #[test]
+    fn a_block_can_be_placed_into_water_and_ground_cover() {
+        // The gauntlet found this: standing beside a lake, every placement was
+        // refused, because the target had to be air rather than replaceable.
+        assert!(BlockId::WATER.is_replaceable());
+        assert!(BlockId::TALL_GRASS.is_replaceable());
+        assert!(BlockId::AIR.is_replaceable());
+        // Solid ground never gives way.
+        assert!(!BlockId::STONE.is_replaceable());
+        assert!(!BlockId::DIRT.is_replaceable());
+        assert!(!BlockId::LEAVES.is_replaceable());
     }
 }

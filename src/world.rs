@@ -15,6 +15,7 @@
 use crate::block::BlockId;
 use crate::chunk::{Chunk, ChunkPos, SubMask};
 use crate::config::*;
+use crate::light::{self, LightVolume};
 use crate::mesh::{mesh_chunk, Neighborhood, Vertex, NEIGHBOR_COUNT};
 use crate::worldgen::{ColumnBounds, TerrainGen};
 use glam::Vec3;
@@ -114,6 +115,24 @@ pub struct World {
     mesh_tx: Sender<ChunkMeshData>,
     mesh_rx: Receiver<ChunkMeshData>,
 
+    /// Current daylight, 0 at midnight and 1 at noon. Only the derived
+    /// `sky_subtract` actually reaches the mesher.
+    daylight: f32,
+    /// Levels the clock takes off the sky channel, 0..=NIGHT_SKY_SUBTRACT.
+    /// Light is baked into vertices, so this changing means the resident world
+    /// has to be rebuilt -- which is why it is an integer with twelve steps
+    /// rather than a float that moves every frame.
+    sky_subtract: u8,
+    /// Chunks waiting to be remeshed because the sky subtract changed. Drained
+    /// a few per frame so a sunset never costs a frame drop.
+    relight_queue: VecDeque<ChunkPos>,
+    /// Chunks whose light changed during the flood fill in progress. Collected
+    /// rather than remeshed per cell, because one torch touches thousands of
+    /// cells across at most a handful of chunks.
+    light_dirty: HashSet<ChunkPos>,
+    /// TEMPORARY: see `debug_light_scene`.
+    debug_scene_built: bool,
+
     noise: Vec<NoiseEvent>,
     pub stats: WorldStats,
 }
@@ -139,6 +158,11 @@ impl World {
             force_mesh: HashSet::new(),
             mesh_tx,
             mesh_rx,
+            daylight: 1.0,
+            sky_subtract: 0,
+            relight_queue: VecDeque::new(),
+            light_dirty: HashSet::new(),
+            debug_scene_built: false,
             noise: Vec::new(),
             stats: WorldStats::default(),
         }
@@ -167,8 +191,14 @@ impl World {
         let (cz, lz) = split_coord(z);
         let pos = ChunkPos::new(cx, cy, cz);
         if let Some(arc) = self.chunks.get_mut(&pos) {
+            let changed = arc.get(lx, ly, lz) != id;
             Arc::make_mut(arc).set(lx, ly, lz, id);
             self.dirty_edit(pos, lx, ly, lz);
+            // Re-placing the same block only heals its carving, and a carved
+            // block already blocks light, so nothing about the light moved.
+            if changed {
+                self.relight_block(x, y, z);
+            }
         }
     }
 
@@ -183,6 +213,12 @@ impl World {
         };
         let destroyed = Arc::make_mut(arc).carve(lx, ly, lz, sx, sy, sz);
         self.dirty_edit(pos, lx, ly, lz);
+        // A partially carved block still stops light, so chipping -- which
+        // happens several times a second while mining -- costs no lighting work
+        // at all. Only the carve that finally empties the block opens it up.
+        if destroyed {
+            self.relight_block(x, y, z);
+        }
         destroyed
     }
 
@@ -219,6 +255,178 @@ impl World {
             Some(c) => c.sub_solid(lx, ly, lz, sx, sy, sz),
             None => !self.terrain.block_at(x, y, z).is_air(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Light
+    //
+    // Two channels per block, 0..=15 each. Block light comes from torches and
+    // ignores the clock; sky light comes from open sky and is dimmed by it.
+    // Gameplay asks `effective_light_at`; the renderer gets it baked into
+    // vertices by the mesher.
+    // -----------------------------------------------------------------------
+
+    /// Block light at a world coordinate, 0..=15. Torches and nothing else, so
+    /// far. Zero outside the loaded world.
+    pub fn light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+        let (cx, lx) = split_coord(x);
+        let (cy, ly) = split_coord(y);
+        let (cz, lz) = split_coord(z);
+        match self.chunks.get(&ChunkPos::new(cx, cy, cz)) {
+            Some(c) => c.block_light(lx, ly, lz),
+            None => 0,
+        }
+    }
+
+    /// Sky light at a world coordinate, 0..=15, *before* the time of day is
+    /// applied. Outside the loaded world it answers from the terrain height, the
+    /// same value `light::seed_chunk` would produce, so queries do not jump as
+    /// chunks stream in.
+    pub fn sky_light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+        let (cx, lx) = split_coord(x);
+        let (cy, ly) = split_coord(y);
+        let (cz, lz) = split_coord(z);
+        match self.chunks.get(&ChunkPos::new(cx, cy, cz)) {
+            Some(c) => c.sky_light(lx, ly, lz),
+            None => light::fallback_sky(self.terrain.height_at(x, z), y),
+        }
+    }
+
+    /// What a mob actually sees: block light, or sky light after the clock has
+    /// taken its cut, whichever is brighter. 0..=15. This is the query the mob
+    /// spawner wants -- a torch-lit room reads bright at midnight, and a cave
+    /// reads dark at noon.
+    pub fn effective_light_at(&self, x: i32, y: i32, z: i32, daylight: f32) -> u8 {
+        light::effective_level(
+            self.light_at(x, y, z),
+            self.sky_light_at(x, y, z),
+            daylight,
+        )
+    }
+
+    /// Tell the world what time it is. Cheap to call every frame: it only does
+    /// work when the daylight crosses one of the twelve sky-subtract steps, and
+    /// even then it just queues the resident chunks for a background remesh.
+    pub fn set_daylight(&mut self, daylight: f32) {
+        self.daylight = daylight;
+        let s = light::sky_subtract(daylight);
+        if s == self.sky_subtract {
+            return;
+        }
+        self.sky_subtract = s;
+        self.relight_queue.clear();
+        self.relight_queue.extend(self.chunks.keys().copied());
+    }
+
+    /// The daylight last handed to [`World::set_daylight`].
+    pub fn daylight(&self) -> f32 {
+        self.daylight
+    }
+
+    /// Levels the clock currently takes off the sky channel.
+    pub fn sky_subtract(&self) -> u8 {
+        self.sky_subtract
+    }
+
+    /// Bring the light back into agreement after one block changed identity,
+    /// then remesh only the chunks that actually went brighter or darker.
+    fn relight_block(&mut self, x: i32, y: i32, z: i32) {
+        light::update_for_block_change(self, x, y, z);
+        self.flush_light_dirty();
+    }
+
+    fn flush_light_dirty(&mut self) {
+        if self.light_dirty.is_empty() {
+            return;
+        }
+        for pos in std::mem::take(&mut self.light_dirty) {
+            self.enqueue_mesh(pos, true);
+        }
+    }
+
+    /// Reconcile the light across the six faces of a chunk that has just become
+    /// resident.
+    ///
+    /// A chunk is lit on its own worker with no view of its neighbours, so light
+    /// that should cross the boundary -- a torch just over the edge, sky
+    /// spilling sideways into a cave mouth -- has not moved yet. Without this,
+    /// every chunk edge shows a hard step.
+    ///
+    /// The scan is written to cost almost nothing in the common case: two
+    /// chunks whose light is uniform and equal (open sky against open sky, rock
+    /// against rock) cannot possibly disagree, and that is most of a streaming
+    /// world.
+    fn merge_light_borders(&mut self, pos: ChunkPos) {
+        let Some(here) = self.chunks.get(&pos).cloned() else {
+            return;
+        };
+        let (ox, oy, oz) = pos.origin();
+        let mut sky_seeds: VecDeque<(i32, i32, i32)> = VecDeque::new();
+        let mut blk_seeds: VecDeque<(i32, i32, i32)> = VecDeque::new();
+
+        for (dx, dy, dz) in light::DIRS {
+            let npos = ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
+            let Some(other) = self.chunks.get(&npos).cloned() else {
+                continue;
+            };
+            // Uniform and identical on both sides: no cell can raise its
+            // opposite number, because transmission never increases a level.
+            if here.uniform_light().is_some() && here.uniform_light() == other.uniform_light() {
+                continue;
+            }
+            let n = CHUNK_SIZE_I;
+            for a in 0..n {
+                for b in 0..n {
+                    // The cell of `here` that sits against this face, and the
+                    // cell of `other` directly across from it.
+                    let (hx, hy, hz) = match (dx, dy, dz) {
+                        (1, 0, 0) => (n - 1, a, b),
+                        (-1, 0, 0) => (0, a, b),
+                        (0, 1, 0) => (a, n - 1, b),
+                        (0, -1, 0) => (a, 0, b),
+                        (0, 0, 1) => (a, b, n - 1),
+                        _ => (a, b, 0),
+                    };
+                    let (l, o) = (
+                        here.light(hx as usize, hy as usize, hz as usize),
+                        other.light(
+                            (hx + dx).rem_euclid(n) as usize,
+                            (hy + dy).rem_euclid(n) as usize,
+                            (hz + dz).rem_euclid(n) as usize,
+                        ),
+                    );
+                    if l == o {
+                        continue;
+                    }
+                    let here_cell = (ox + hx, oy + hy, oz + hz);
+                    let there_cell = (here_cell.0 + dx, here_cell.1 + dy, here_cell.2 + dz);
+                    // Seed whichever side is brighter; `light::spread` only ever
+                    // raises a level, so seeding both would also be correct,
+                    // just slower.
+                    if light::block_of(l) > light::block_of(o) {
+                        blk_seeds.push_back(here_cell);
+                    } else if light::block_of(o) > light::block_of(l) {
+                        blk_seeds.push_back(there_cell);
+                    }
+                    if light::sky_of(l) > light::sky_of(o) {
+                        sky_seeds.push_back(here_cell);
+                    } else if light::sky_of(o) > light::sky_of(l) {
+                        sky_seeds.push_back(there_cell);
+                    }
+                }
+            }
+        }
+
+        if !blk_seeds.is_empty() {
+            light::spread(self, blk_seeds, false);
+        }
+        if !sky_seeds.is_empty() {
+            light::spread(self, sky_seeds, true);
+        }
+        // The chunk itself is meshed by the caller, so drop it from the dirty
+        // set and only chase the neighbours light actually leaked into.
+        self.light_dirty.remove(&pos);
+        self.flush_light_dirty();
     }
 
     // -----------------------------------------------------------------------
@@ -492,7 +700,9 @@ impl World {
         if !(0..WORLD_HEIGHT).contains(&y) {
             return false;
         }
-        if !self.block_at(x, y, z).is_air() {
+        // Replaceable, not merely air: water and ground cover give way to a
+        // placed block instead of blocking it.
+        if !self.block_at(x, y, z).is_replaceable() {
             return false;
         }
         // Block cell as an AABB; refuse if it would intersect the player.
@@ -538,6 +748,8 @@ impl World {
 
         self.intake_generated();
         out.ready = self.collect_meshes();
+        self.debug_light_scene(center);
+        self.drain_relight();
         self.dispatch_generation();
         self.dispatch_meshing();
 
@@ -554,6 +766,131 @@ impl World {
             && self.generating.is_empty()
             && self.mesh_queue.is_empty()
             && self.meshing.is_empty()
+            && self.relight_queue.is_empty()
+    }
+
+    /// Feed a few chunks per frame back into the mesher after the sky subtract
+    /// changed. Rebuilding two thousand chunks in one frame would be a visible
+    /// hitch at every sunrise and sunset; spread over a couple of seconds it is
+    /// invisible, and the light is only moving one level anyway.
+    /// TEMPORARY visual-check scaffolding, off unless `LOUDSTONE_LIGHTDEMO` is
+    /// set. Builds a roofed stone room around the spawn so a screenshot can show
+    /// darkness, a torch's pool of light and a sky shaft. Delete before merge.
+    fn debug_light_scene(&mut self, center: ChunkPos) {
+        let Ok(kind) = std::env::var("LOUDSTONE_LIGHTDEMO") else {
+            return;
+        };
+        if self.debug_scene_built || self.chunks.len() < 900 {
+            return;
+        }
+        self.debug_scene_built = true;
+        if kind == "night" {
+            self.set_daylight(0.0);
+            println!("[lightdemo] night: sky subtract {}", self.sky_subtract);
+            return;
+        }
+        if kind == "dusk" {
+            self.set_daylight(0.45);
+            println!("[lightdemo] dusk: sky subtract {}", self.sky_subtract);
+            return;
+        }
+        let (ox, _, oz) = center.origin();
+        let (cx, cz) = (ox + 8, oz + 8);
+        let floor = self.terrain.height_at(cx, cz);
+        let r = 14i32;
+        let h = 7i32;
+        let t = Instant::now();
+        let mut edits = 0u32;
+        for dz in -r..=r {
+            for dx in -r..=r {
+                let edge = dx.abs() == r || dz.abs() == r;
+                for dy in -2..=h {
+                    let id = if dy <= 0 {
+                        BlockId::COBBLESTONE
+                    } else if edge || dy == h {
+                        // A skylight in the roof, off to one side.
+                        let hole = dy == h && (dx - 8).abs() <= 1 && (dz - 8).abs() <= 1;
+                        if hole { BlockId::AIR } else { BlockId::COBBLESTONE }
+                    } else {
+                        BlockId::AIR
+                    };
+                    self.set_block(cx + dx, floor + dy, cz + dz, id);
+                    edits += 1;
+                }
+            }
+        }
+        let build = t.elapsed();
+        // Clear the rock above so the roof is genuinely the only lid.
+        for dz in -r..=r {
+            for dx in -r..=r {
+                for dy in h + 1..h + 8 {
+                    self.set_block(cx + dx, floor + dy, cz + dz, BlockId::AIR);
+                }
+            }
+        }
+        let mut torches = 0;
+        if kind == "night" {
+            self.set_daylight(0.0);
+        }
+        if kind != "dark" {
+            // A ring around the middle of the room, so at least one is in shot
+            // whichever way the camera happens to be pointing.
+            let mut spots = Vec::new();
+            if kind == "one" {
+                spots.push((-5, -5));
+            } else {
+                let mut dz = -r + 3;
+                while dz <= r - 3 {
+                    let mut dx = -r + 3;
+                    while dx <= r - 3 {
+                        spots.push((dx, dz));
+                        dx += 8;
+                    }
+                    dz += 8;
+                }
+            }
+            for (dx, dz) in spots {
+                let t0 = Instant::now();
+                self.set_block(cx + dx, floor + 1, cz + dz, BlockId::TORCH);
+                if torches == 0 {
+                    println!("[lightdemo] one torch: {:.2} ms", t0.elapsed().as_secs_f32() * 1000.0);
+                }
+                torches += 1;
+            }
+        }
+        let probe = |w: &World, dx: i32, dy: i32, dz: i32| {
+            format!(
+                "({dx:>3},{dy},{dz:>3}) blk={:>2} sky={:>2}",
+                w.light_at(cx + dx, floor + dy, cz + dz),
+                w.sky_light_at(cx + dx, floor + dy, cz + dz)
+            )
+        };
+        println!(
+            "[lightdemo] {edits} blocks in {:.1} ms, {torches} torches, room y={floor}",
+            build.as_secs_f32() * 1000.0
+        );
+        for p in [
+            (-6, 1, 0),
+            (-5, 1, 0),
+            (-2, 1, 0),
+            (0, 1, 0),
+            (0, 4, 0),
+            (8, 1, 8),
+            (8, 6, 8),
+            (12, 1, 12),
+            (0, 9, 0),
+        ] {
+            println!("[lightdemo]   {}", probe(self, p.0, p.1, p.2));
+        }
+    }
+
+    fn drain_relight(&mut self) {
+        for _ in 0..RELIGHT_CHUNKS_PER_FRAME {
+            let Some(pos) = self.relight_queue.pop_front() else {
+                break;
+            };
+            self.enqueue_mesh(pos, false);
+        }
     }
 
     fn bounds_for(&mut self, cx: i32, cz: i32) -> ColumnBounds {
@@ -666,7 +1003,12 @@ impl World {
             let terrain = self.terrain.clone();
             let tx = self.gen_tx.clone();
             rayon::spawn(move || {
-                let chunk = terrain.generate(pos);
+                let mut chunk = terrain.generate(pos);
+                // Light the chunk here, on the worker that generated it, from
+                // the column heightmap rather than a flood fill from the world
+                // ceiling. Doing it on the main thread at intake instead is what
+                // would turn a 0.4 s world load into a multi-second one.
+                light::seed_chunk(&mut chunk, &terrain);
                 let _ = tx.send((pos, chunk));
             });
         }
@@ -681,6 +1023,9 @@ impl World {
             self.stats.chunks_generated += 1;
             let empty = chunk.is_empty();
             self.chunks.insert(pos, Arc::new(chunk));
+            // Light is seeded per chunk in isolation, so anything that should
+            // cross this chunk's faces has not moved yet.
+            self.merge_light_borders(pos);
             // Note what we deliberately do *not* do here: mark the six
             // neighbours dirty. An unmodified chunk is byte-identical to what
             // the meshing skirt already sampled from the generator, so a
@@ -761,18 +1106,68 @@ impl World {
         })
     }
 
+    /// Whether every neighbour this chunk's mesh will sample is already resident.
+    ///
+    /// This gate is worth far more than it looks. `Neighborhood::build` falls
+    /// back to raw terrain generation for any neighbour that is missing, and it
+    /// does so for the whole 18^3 padded volume -- so meshing a chunk early
+    /// regenerates terrain for its neighbours, then throws the mesh away and
+    /// redoes it when they actually arrive. With cheap terrain that was merely
+    /// wasteful; once generation grew biomes, trees and water it became the
+    /// dominant cost of loading the world.
+    ///
+    /// A neighbour outside the world vertically can never exist, and one that
+    /// is neither resident nor pending is never coming (it is outside the load
+    /// radius) -- waiting on either would stall forever, so neither is waited on.
+    fn neighbors_ready(&self, pos: ChunkPos) -> bool {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dy, dz) == (0, 0, 0) {
+                        continue;
+                    }
+                    let n = ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
+                    if n.y < 0 || n.y >= CHUNK_COLUMN {
+                        continue;
+                    }
+                    if self.chunks.contains_key(&n) {
+                        continue;
+                    }
+                    if self.gen_queued.contains(&n) || self.generating.contains(&n) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     fn dispatch_meshing(&mut self) {
-        while self.meshing.len() < MESH_JOBS_IN_FLIGHT {
+        // Chunks whose neighbours have not arrived yet, put back at the end of
+        // the queue. Bounding the scan to the queue length as it was on entry
+        // stops a queue full of deferrals from spinning inside one call.
+        let mut deferred: Vec<ChunkPos> = Vec::new();
+        let mut scanned = 0usize;
+        let scan_limit = self.mesh_queue.len();
+
+        while self.meshing.len() < MESH_JOBS_IN_FLIGHT && scanned < scan_limit {
             let Some(pos) = self.mesh_queue.pop_front() else {
                 break;
             };
+            scanned += 1;
             self.mesh_queued.remove(&pos);
             if !self.chunks.contains_key(&pos) {
                 self.force_mesh.remove(&pos);
                 continue;
             }
-            // An edit always meshes: it may have turned an existing mesh into
-            // nothing, and only a real (empty) mesh result frees the GPU buffer.
+            // An edit always meshes, immediately: it may have turned an existing
+            // mesh into nothing, and only a real (empty) mesh result frees the
+            // GPU buffer. Everything else waits for its neighbours.
+            let forced = self.force_mesh.contains(&pos);
+            if !forced && !self.neighbors_ready(pos) {
+                deferred.push(pos);
+                continue;
+            }
             if !self.force_mesh.remove(&pos) && self.is_provably_invisible(pos) {
                 continue;
             }
@@ -780,8 +1175,9 @@ impl World {
             let neighbors = self.gather_neighbors(pos);
             let terrain = self.terrain.clone();
             let tx = self.mesh_tx.clone();
+            let subtract = self.sky_subtract;
             rayon::spawn(move || {
-                let nb = Neighborhood::build(pos, &neighbors, &terrain);
+                let nb = Neighborhood::build(pos, &neighbors, &terrain, subtract);
                 let (verts, indices) = mesh_chunk(&nb);
                 let _ = tx.send(ChunkMeshData {
                     pos,
@@ -789,6 +1185,12 @@ impl World {
                     indices,
                 });
             });
+        }
+
+        for pos in deferred {
+            if self.mesh_queued.insert(pos) {
+                self.mesh_queue.push_back(pos);
+            }
         }
     }
 
@@ -867,8 +1269,105 @@ impl World {
     pub fn mesh_now(&self, pos: ChunkPos) -> Option<(Vec<Vertex>, Vec<u32>)> {
         self.chunks.get(&pos)?;
         let neighbors = self.gather_neighbors(pos);
-        let nb = Neighborhood::build(pos, &neighbors, &self.terrain);
+        let nb = Neighborhood::build(pos, &neighbors, &self.terrain, self.sky_subtract);
         Some(mesh_chunk(&nb))
+    }
+
+    /// Generate a chunk synchronously, light it, and merge its borders. The
+    /// synchronous twin of the streaming path, for tests and for anything that
+    /// needs a chunk fully usable right now.
+    pub fn ensure_lit(&mut self, pos: ChunkPos) -> bool {
+        if !self.ensure(pos) {
+            return false;
+        }
+        if let Some(arc) = self.chunks.get_mut(&pos) {
+            let c = Arc::make_mut(arc);
+            if !c.lit {
+                light::seed_chunk(c, &self.terrain);
+            }
+        }
+        self.merge_light_borders(pos);
+        true
+    }
+}
+
+/// The world is the only thing a flood fill is allowed to write to. Reads fall
+/// back to terrain generation outside the loaded region so light does not step
+/// at the edge of what has streamed in; writes stop dead there, because a chunk
+/// that is not resident has nowhere to put the value.
+impl LightVolume for World {
+    #[inline]
+    fn opacity_at(&self, x: i32, y: i32, z: i32) -> u8 {
+        light::opacity(self.block_at(x, y, z))
+    }
+
+    #[inline]
+    fn emission_at(&self, x: i32, y: i32, z: i32) -> u8 {
+        light::emission(self.block_at(x, y, z))
+    }
+
+    #[inline]
+    fn block_light(&self, x: i32, y: i32, z: i32) -> u8 {
+        self.light_at(x, y, z)
+    }
+
+    #[inline]
+    fn sky_light(&self, x: i32, y: i32, z: i32) -> u8 {
+        self.sky_light_at(x, y, z)
+    }
+
+    #[inline]
+    fn writable(&self, x: i32, y: i32, z: i32) -> bool {
+        if !(0..WORLD_HEIGHT).contains(&y) {
+            return false;
+        }
+        let (cx, _) = split_coord(x);
+        let (cy, _) = split_coord(y);
+        let (cz, _) = split_coord(z);
+        self.chunks.contains_key(&ChunkPos::new(cx, cy, cz))
+    }
+
+    fn set_block_light(&mut self, x: i32, y: i32, z: i32, level: u8) {
+        let (cx, lx) = split_coord(x);
+        let (cy, ly) = split_coord(y);
+        let (cz, lz) = split_coord(z);
+        if let Some(arc) = self.chunks.get_mut(&ChunkPos::new(cx, cy, cz)) {
+            Arc::make_mut(arc).set_block_light(lx, ly, lz, level);
+        }
+    }
+
+    fn set_sky_light(&mut self, x: i32, y: i32, z: i32, level: u8) {
+        let (cx, lx) = split_coord(x);
+        let (cy, ly) = split_coord(y);
+        let (cz, lz) = split_coord(z);
+        if let Some(arc) = self.chunks.get_mut(&ChunkPos::new(cx, cy, cz)) {
+            Arc::make_mut(arc).set_sky_light(lx, ly, lz, level);
+        }
+    }
+
+    fn touch(&mut self, x: i32, y: i32, z: i32) {
+        let (cx, lx) = split_coord(x);
+        let (cy, ly) = split_coord(y);
+        let (cz, lz) = split_coord(z);
+        self.light_dirty.insert(ChunkPos::new(cx, cy, cz));
+        // A boundary cell is sampled by the neighbouring chunk's mesh too, so
+        // its mesh is stale now as well.
+        let last = CHUNK_SIZE - 1;
+        if lx == 0 {
+            self.light_dirty.insert(ChunkPos::new(cx - 1, cy, cz));
+        } else if lx == last {
+            self.light_dirty.insert(ChunkPos::new(cx + 1, cy, cz));
+        }
+        if ly == 0 {
+            self.light_dirty.insert(ChunkPos::new(cx, cy - 1, cz));
+        } else if ly == last {
+            self.light_dirty.insert(ChunkPos::new(cx, cy + 1, cz));
+        }
+        if lz == 0 {
+            self.light_dirty.insert(ChunkPos::new(cx, cy, cz - 1));
+        } else if lz == last {
+            self.light_dirty.insert(ChunkPos::new(cx, cy, cz + 1));
+        }
     }
 }
 
@@ -1130,7 +1629,7 @@ mod tests {
                             .get(&ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz))
                             .cloned()
                     });
-                let nb = Neighborhood::build(*pos, &neighbors, &terrain);
+                let nb = Neighborhood::build(*pos, &neighbors, &terrain, 0);
                 mesh_chunk(&nb).0.len()
             })
             .sum();
@@ -1222,5 +1721,44 @@ mod tests {
         assert!(w.block_at(0, s + 1, 0).is_air());
         assert_eq!(w.fill_ratio(0, s, 0), 1.0);
         assert!(w.sub_solid(0, s, 0, 0, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod scratch_probe {
+    use super::*;
+
+    #[test]
+    fn probe_deep_light() {
+        let mut w = World::new(1337);
+        let center = ChunkPos::new(0, 0, 0);
+        let deadline = Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            w.stream(center);
+            if w.is_idle() { break; }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        println!("chunks {}", w.chunks.len());
+        for y in [5, 10, 20, 40, 60, 62, 64, 66, 70] {
+            let mut hist = [0u32; 16];
+            let mut air = 0;
+            for z in -20..20 {
+                for x in -20..20 {
+                    if w.block_at(x, y, z).is_air() { air += 1; }
+                    hist[w.sky_light_at(x, y, z) as usize] += 1;
+                }
+            }
+            println!("y={y:>3} air={air:>4} sky hist {:?}", hist);
+        }
+        // Vertex light of a deep chunk's mesh.
+        for cy in [0, 1, 2, 3] {
+            let pos = ChunkPos::new(0, cy, 0);
+            if let Some((verts, _)) = w.mesh_now(pos) {
+                let mx = verts.iter().map(|v| v.light).fold(0.0f32, f32::max);
+                let mn = verts.iter().map(|v| v.light).fold(9.0f32, f32::min);
+                println!("chunk y={cy}: {} verts, light {:.3}..{:.3}", verts.len(), mn, mx);
+            }
+        }
     }
 }
