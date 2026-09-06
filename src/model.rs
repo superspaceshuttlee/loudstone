@@ -260,7 +260,7 @@ pub fn append(
             let uv_rect = texture::skin_uv(skin, rects[f]);
             let shade = FACE_SHADE[f] * light;
             let base = verts.len() as u32;
-            for (i, c) in corners.iter().enumerate() {
+            for c in corners.iter() {
                 // Texel-space corner of this box face.
                 let p = centre + Vec3::new(c[0], c[1], c[2]) * half;
                 // Rotate about the part's pivot, then face the body, then land
@@ -268,7 +268,7 @@ pub fn append(
                 let p = local * (p - pivot) + pivot;
                 let p = body * p;
                 let world = origin + p * TEXEL * scale;
-                let uv = FACE_UV[i];
+                let uv = face_uv(f, *c);
                 verts.push(Vertex {
                     pos: world.to_array(),
                     color: [1.0, 1.0, 1.0],
@@ -295,9 +295,26 @@ const FACE_CORNERS: [[[f32; 3]; 4]; 6] = [
     [[-1., -1., 1.], [-1., -1., -1.], [-1., 1., -1.], [-1., 1., 1.]], // -X
 ];
 
-/// Where each face corner lands in its skin rectangle. `v` runs downward like an
-/// image row, so a face is never drawn upside down.
-const FACE_UV: [[f32; 2]; 4] = [[0., 0.], [0., 1.], [1., 1.], [1., 0.]];
+/// Where a box corner lands in its face's rectangle, derived from the corner's
+/// own position rather than from its index.
+///
+/// Indexing by corner number looks equivalent and is not: the corner ORDER
+/// differs between faces, so a fixed table rotates the texture 90 degrees on
+/// some of them. On a 4x12 arm that smears a four-texel strip down a twelve-
+/// texel face, which is where the vertical streaking on every limb came from.
+/// `v` runs downward like an image row, so nothing is drawn upside down.
+fn face_uv(face: usize, c: [f32; 3]) -> [f32; 2] {
+    // Box corners are -1..1; map to 0..1 first.
+    let (x, y, z) = ((c[0] + 1.0) * 0.5, (c[1] + 1.0) * 0.5, (c[2] + 1.0) * 0.5);
+    match face {
+        0 => [x, z],               // +Y top
+        1 => [x, 1.0 - z],         // -Y bottom
+        2 => [1.0 - x, 1.0 - y],   // +Z back
+        3 => [x, 1.0 - y],         // -Z front
+        4 => [z, 1.0 - y],         // +X
+        _ => [1.0 - z, 1.0 - y],   // -X
+    }
+}
 
 /// Per-face shading, matching the terrain so mobs sit in the same light.
 const FACE_SHADE: [f32; 6] = [1.00, 0.45, 0.80, 0.80, 0.65, 0.65];
@@ -427,6 +444,30 @@ mod tests {
         for p in parts.iter().filter(|p| !matches!(p.channel, Channel::Head | Channel::Body)) {
             let bottom = p.offset.1 - p.size.1 as f32 * 0.5;
             assert!(bottom.abs() < 0.01, "a leg should reach the ground, got {bottom}");
+        }
+    }
+
+    #[test]
+    fn a_faces_texture_is_not_transposed() {
+        // Walking a box face along its width must move along the texture's
+        // width, not its height. Indexing UVs by corner number satisfied every
+        // other test while silently rotating the texture on four of six faces.
+        // On a +/-Z face the width runs along x; on a +/-X face it runs along z,
+        // because that axis is the face normal. Height is y on all four sides.
+        for (face, along) in [(2usize, 0usize), (3, 0), (4, 2), (5, 2)] {
+            let mut a = [-1.0f32; 3];
+            let mut b = [-1.0f32; 3];
+            b[along] = 1.0;
+            let du = face_uv(face, b)[0] - face_uv(face, a)[0];
+            a[1] = -1.0;
+            let mut up = [-1.0f32; 3];
+            up[1] = 1.0;
+            let dv = face_uv(face, up)[1] - face_uv(face, a)[1];
+            assert!(
+                du.abs() > 0.9,
+                "face {face}: texture width should follow axis {along}, du={du}"
+            );
+            assert!(dv.abs() > 0.9, "face {face}: texture height should follow y, dv={dv}");
         }
     }
 
