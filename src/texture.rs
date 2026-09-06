@@ -591,9 +591,9 @@ pub const QUAD_HEAD_SIZE: (usize, usize, usize) = (8, 8, 8);
 pub const QUAD_BODY_UV: (usize, usize) = (0, 16);
 pub const QUAD_BODY_SIZE: (usize, usize, usize) = (10, 8, 16);
 pub const QUAD_SNOUT_UV: (usize, usize) = (34, 44);
-pub const QUAD_SNOUT_SIZE: (usize, usize, usize) = (4, 3, 2);
+pub const QUAD_SNOUT_SIZE: (usize, usize, usize) = (4, 3, 1);
 pub const QUAD_LEG_UV: (usize, usize) = (0, 44);
-pub const QUAD_LEG_SIZE: (usize, usize, usize) = (4, 8, 4);
+pub const QUAD_LEG_SIZE: (usize, usize, usize) = (4, 6, 4);
 
 /// Paint one mob's skin sheet.
 fn paint_skin(which: usize, sk: &mut Skin) {

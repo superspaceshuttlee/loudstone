@@ -144,15 +144,27 @@ pub const HIGHLIGHT_INFLATE: f32 = 0.004;
 pub const AO_STRENGTH: f32 = 0.30;
 /// Flat per-face light, in the mesher's face order:
 /// `[+Y, -Y, +Z, -Z, +X, -X]`. A fake sun from +X/+Z keeps opposite walls apart.
-pub const FACE_SHADE: [f32; 6] = [1.00, 0.38, 0.74, 0.56, 0.88, 0.64];
+/// Baked per-axis face shade: top, bottom, +Z, -Z, +X, -X.
+///
+/// These used to differ between the two faces of an axis (0.74 against 0.56),
+/// which is a sun direction painted permanently into the geometry -- and once
+/// the shader grew a real sun that moves with the time of day, the two fought
+/// each other: a face could be baked dark while the actual sun was full on it.
+/// They are symmetric per axis now, the way Minecraft's are. What they provide
+/// is the constant readability of a voxel edge; the direction comes from the sun.
+pub const FACE_SHADE: [f32; 6] = [1.00, 0.50, 0.80, 0.80, 0.62, 0.62];
 /// Extra darkening applied to freshly carved sub-voxel surfaces, so craters read
 /// as recessed rather than as bright new geometry.
 pub const CARVE_SHADE: f32 = 0.78;
 /// Sky, authored in sRGB.
 pub const SKY_COLOR: [f32; 3] = [0.46, 0.62, 0.85];
 /// Fog band, as a fraction of the render distance in blocks.
-pub const FOG_START_FRAC: f32 = 0.62;
-pub const FOG_END_FRAC: f32 = 0.98;
+// Fog used to begin at 62% of the view distance, which put a wall of haze
+// across the middle of every landscape and hid the terrain shape at exactly the
+// range where you judge it. Starting it late leaves the land readable and keeps
+// haze for what it is good at: the far horizon.
+pub const FOG_START_FRAC: f32 = 0.84;
+pub const FOG_END_FRAC: f32 = 1.0;
 /// Colour of the targeting wireframe, authored in sRGB.
 pub const HIGHLIGHT_COLOR: [f32; 3] = [0.03, 0.03, 0.05];
 

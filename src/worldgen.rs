@@ -90,10 +90,63 @@ pub mod tuning {
     pub const EROSION_OCTAVES: u32 = 3;
     /// How much full erosion flattens the hills. 1.0 would make plains dead flat.
     pub const EROSION_FLATTEN: f64 = 0.78;
+    /// Fine surface detail, a couple of blocks either way.
+    ///
+    /// A heightmap world quantises a smooth surface to whole blocks, and on any
+    /// gently sloping ground that turns into wide flat terraces following the
+    /// contour lines -- the stair-stepped, contour-map look. Adding a little
+    /// high-frequency noise before the rounding means the contour a step follows
+    /// is ragged instead of smooth, so the eye reads rock rather than a graph.
+    pub const DETAIL_SCALE: f64 = 0.026;
+    pub const DETAIL_OCTAVES: u32 = 2;
+    pub const DETAIL_AMP: f64 = 2.3;
+    /// Detail is strongest on steep ground and fades out on the flat, so plains
+    /// stay walkable and buildable instead of becoming permanently bumpy.
+    pub const DETAIL_SLOPE_GAIN: f64 = 2.2;
+    /// Mid-scale relief on bare mountain rock: shoulders, ledges and benches.
+    ///
+    /// A uniformly steep heightmap slope quantises to a perfectly regular
+    /// staircase, and from a distance that regularity reads as a grid of little
+    /// pyramids rather than as a mountain. Fine noise does not fix it -- it just
+    /// makes the staircase fuzzy. What breaks it is relief at the scale of the
+    /// landform itself, which is what puts a ledge here and a bulge there and
+    /// gives the slope somewhere for the eye to rest.
+    pub const LEDGE_SCALE: f64 = 0.0125;
+    pub const LEDGE_OCTAVES: u32 = 2;
+    pub const LEDGE_AMP: f64 = 5.5;
+
+    /// Block-scale roughness on rock. Short wavelength, about a block of
+    /// amplitude, and the single most important term for how a mountain reads.
+    ///
+    /// A heightmap slope of gradient one quantises to a *perfectly regular*
+    /// staircase: every column steps down exactly one block from its neighbour,
+    /// and the result is diagonal corduroy across the whole face. No amount of
+    /// large-scale noise fixes it, because the problem is not the shape of the
+    /// slope, it is that the rounding is uniform along it.
+    ///
+    /// Minecraft stopped having this problem in 1.18 by giving up heightmaps
+    /// entirely: solidity there is a 3D density function of (x, y, z), so a
+    /// cliff face is irregular and can overhang, and there is no staircase to
+    /// quantise. That is the better answer and it is also a rewrite -- surface
+    /// height is assumed by the lighting seed, decoration, tree placement and
+    /// the meshing skirt here. Roughening the height by about a block at a
+    /// wavelength of a few blocks breaks the regularity in the same place the
+    /// eye sees it, and stays inside the architecture.
+    pub const SCREE_SCALE: f64 = 0.29;
+    pub const SCREE_AMP: f64 = 1.5;
+    /// Roughness applied to all land; bare rock gets [`SCREE_AMP`] on top.
+    pub const SCREE_BASE: f64 = 2.2;
+    /// Size of the patches of andesite, gravel and granite on an exposed face.
+    pub const ROCK_PATCH_SCALE: f64 = 0.032;
+
     /// Ridged noise for mountain spines.
     pub const RIDGE_SCALE: f64 = 0.0055;
-    pub const RIDGE_OCTAVES: u32 = 4;
+    pub const RIDGE_OCTAVES: u32 = 3;
     pub const RIDGE_AMP: f64 = 46.0;
+    /// Domain-warp distance for the ridge field, as a fraction of one lattice
+    /// cell. See [`TerrainGen::ridged2`] -- without this the mountains wear a
+    /// regular grid of pyramids.
+    pub const RIDGE_WARP: f64 = 0.42;
     /// Continent height at which ridging starts and reaches full strength.
     pub const MOUNTAIN_LO: f64 = 10.0;
     pub const MOUNTAIN_HI: f64 = 46.0;
@@ -423,7 +476,10 @@ pub mod tuning {
             per_cell: 3,
             radius: 4.2,
             y_min: 1,
-            y_max: 96,
+            // Reaches mountain height. Capping these at 96 left every peak in
+            // the world a single uniform grey, which is half of why a slope read
+            // as repeating corduroy: identical blocks make the staircase legible.
+            y_max: 200,
         },
         Vein {
             block: BlockId::DIORITE,
@@ -431,7 +487,7 @@ pub mod tuning {
             per_cell: 3,
             radius: 4.2,
             y_min: 1,
-            y_max: 96,
+            y_max: 200,
         },
         Vein {
             block: BlockId::ANDESITE,
@@ -439,7 +495,7 @@ pub mod tuning {
             per_cell: 3,
             radius: 4.2,
             y_min: 1,
-            y_max: 96,
+            y_max: 200,
         },
     ];
 
@@ -793,6 +849,14 @@ fn memo_index(seed: u32, x: i32, z: i32) -> usize {
 // The generator
 // ---------------------------------------------------------------------------
 
+/// Per-octave rotation, roughly 32 degrees. Any angle that is not a multiple of
+/// 45 will do; what matters is that repeated application never returns the grid
+/// to where it started, which is what an axis- or diagonal-aligned angle would.
+const OCT_COS: f64 = 0.848_048;
+const OCT_SIN: f64 = 0.529_919;
+/// Frequency step between octaves. Deliberately not 2.0 -- see [`TerrainGen::fbm2`].
+const OCT_LACUNARITY: f64 = 2.037;
+
 pub struct TerrainGen {
     continent: Perlin,
     hills: Perlin,
@@ -803,6 +867,7 @@ pub struct TerrainGen {
     humid: Perlin,
     warp: Perlin,
     ravine: Perlin,
+    detail: Perlin,
     seabed: Perlin,
     cave_a: Perlin,
     cave_b: Perlin,
@@ -822,6 +887,7 @@ impl TerrainGen {
             humid: Perlin::new(seed.wrapping_add(6)),
             warp: Perlin::new(seed.wrapping_add(7)),
             ravine: Perlin::new(seed.wrapping_add(8)),
+            detail: Perlin::new(seed.wrapping_add(13)),
             seabed: Perlin::new(seed.wrapping_add(9)),
             cave_a: Perlin::new(seed.wrapping_add(10)),
             cave_b: Perlin::new(seed.wrapping_add(11)),
@@ -832,17 +898,33 @@ impl TerrainGen {
 
     // --- noise helpers ------------------------------------------------------
 
+
     /// Fractal sum of a 2D noise source, normalised to roughly -1..1.
+    ///
+    /// Each octave is **rotated and offset** before it is sampled, and the
+    /// frequency step is deliberately not exactly 2. This is not a flourish; it
+    /// is the difference between terrain and corduroy.
+    ///
+    /// Perlin noise is built on an axis-aligned integer lattice, and its
+    /// features line up with that lattice and its diagonals. Stack octaves at
+    /// exactly double frequency from a common origin and every octave's lattice
+    /// lands on top of every other one, so instead of cancelling out, those
+    /// alignments reinforce into visible diagonal ribbing across whole
+    /// mountainsides. Rotating each octave by an irrational-ish angle and
+    /// stepping by 2.037 rather than 2.0 means no two octaves ever share a grid
+    /// again, and the ribbing has nothing to build on.
     fn fbm2(noise: &Perlin, x: f64, z: f64, scale: f64, octaves: u32) -> f64 {
         let mut sum = 0.0;
         let mut amp = 1.0;
-        let mut freq = scale;
         let mut norm = 0.0;
+        let (mut px, mut pz) = (x * scale, z * scale);
         for _ in 0..octaves {
-            sum += noise.get([x * freq, z * freq]) * amp;
+            sum += noise.get([px, pz]) * amp;
             norm += amp;
             amp *= 0.5;
-            freq *= 2.0;
+            let (rx, rz) = (px * OCT_COS - pz * OCT_SIN, px * OCT_SIN + pz * OCT_COS);
+            px = rx * OCT_LACUNARITY + 71.31;
+            pz = rz * OCT_LACUNARITY - 43.77;
         }
         sum / norm
     }
@@ -863,17 +945,39 @@ impl TerrainGen {
 
     /// Ridged fractal noise, 0..1, with sharp crests where the source crosses
     /// zero. This is what makes mountain spines look like spines.
-    fn ridged2(noise: &Perlin, x: f64, z: f64, scale: f64, octaves: u32) -> f64 {
+    ///
+    /// The input is **domain warped** first, and that is not optional here.
+    /// Perlin noise is exactly zero at every point of its integer lattice, and a
+    /// ridged function peaks wherever its source is zero -- so plain ridged
+    /// Perlin puts a crest on every single lattice point and produces a perfect
+    /// regular grid of little pyramids across every mountainside. Rotating the
+    /// octaves does not help: each octave's own lattice is still a grid.
+    /// Warping the coordinates with a lower-frequency noise bends that grid into
+    /// something with no repeating structure left, and as a side effect it is
+    /// what makes a ridge wind like a real spine instead of running in rows.
+    fn ridged2(noise: &Perlin, warp: &Perlin, x: f64, z: f64, scale: f64, octaves: u32) -> f64 {
+        // Warp distance scales with the feature size, so the distortion is
+        // always a meaningful fraction of a lattice cell.
+        let amp = tuning::RIDGE_WARP / scale;
+        let wx = Self::fbm2(warp, x, z, scale * 0.6, 2);
+        let wz = Self::fbm2(warp, x + 3110.0, z - 9770.0, scale * 0.6, 2);
+        let (x, z) = (x + wx * amp, z + wz * amp);
         let mut sum = 0.0;
         let mut amp = 1.0;
         let mut freq = scale;
         let mut norm = 0.0;
+        // See `fbm2`: ridged noise shows lattice alignment even more plainly,
+        // because a crest lands exactly where the source crosses zero and
+        // aligned octaves put those crossings in rows.
+        let (mut px, mut pz) = (x * freq, z * freq);
         for _ in 0..octaves {
-            let v = 1.0 - (noise.get([x * freq, z * freq]).abs() * 1.42).min(1.0);
+            let v = 1.0 - (noise.get([px, pz]).abs() * 1.42).min(1.0);
             sum += v * v * amp;
             norm += amp;
             amp *= 0.5;
-            freq *= 2.0;
+            let (rx, rz) = (px * OCT_COS - pz * OCT_SIN, px * OCT_SIN + pz * OCT_COS);
+            px = rx * OCT_LACUNARITY - 19.44;
+            pz = rz * OCT_LACUNARITY + 57.02;
         }
         sum / norm
     }
@@ -957,12 +1061,48 @@ impl TerrainGen {
 
         let hills = Self::fbm2(&self.hills, xf, zf, t::HILL_SCALE, t::HILL_OCTAVES);
         let mountainness = smoothstep64(t::MOUNTAIN_LO, t::MOUNTAIN_HI, continental);
-        let ridged = Self::ridged2(&self.ridge, xf, zf, t::RIDGE_SCALE, t::RIDGE_OCTAVES);
+        let ridged = Self::ridged2(
+            &self.ridge,
+            &self.warp,
+            xf,
+            zf,
+            t::RIDGE_SCALE,
+            t::RIDGE_OCTAVES,
+        );
 
         let mut h = t::BASE_HEIGHT
             + continental
             + hills * t::HILL_AMP * roughness * amp_mul as f64
             + ridged * t::RIDGE_AMP * mountainness * (0.35 + 0.65 * roughness);
+
+        // Break the block-scale staircase. See `SCREE_AMP`.
+        //
+        // Applied to all land, not just to mountains. Terracing is a function of
+        // *slope*, not of altitude: the widest, ugliest shelves appear on the
+        // gentle flanks low down, where a shallow gradient rounds into shelves
+        // many blocks deep. Gating this on height left exactly those slopes bare
+        // and fixed only the peaks, which were the part that looked least wrong.
+        //
+        // It fades out at the waterline so beaches and the sea floor stay clean;
+        // a lumpy shoreline reads as broken rather than as natural ground.
+        let scree = Self::fbm2(&self.detail, xf + 111.0, zf - 777.0, t::SCREE_SCALE, 1);
+        let above_water = smoothstep64(0.0, 10.0, h - t::WATER_LEVEL as f64);
+        h += scree * (t::SCREE_BASE + t::SCREE_AMP * mountainness) * above_water;
+
+        // Ledges and shoulders on mountain rock, so a steep face is a series of
+        // benches rather than one unbroken ramp.
+        if mountainness > 0.0 {
+            let ledge = Self::fbm2(&self.detail, xf + 5000.0, zf - 9000.0, t::LEDGE_SCALE, t::LEDGE_OCTAVES);
+            h += ledge * t::LEDGE_AMP * mountainness;
+        }
+
+        // Break up the contour terracing. Weighted by how steep the ground
+        // already is: a flat plain should stay a flat plain, but a mountainside
+        // that would otherwise render as a stack of smooth shelves gets the
+        // roughness that makes it read as rock.
+        let steep = (hills.abs() * roughness + mountainness).min(1.0);
+        let detail = Self::fbm2(&self.detail, xf, zf, t::DETAIL_SCALE, t::DETAIL_OCTAVES);
+        h += detail * t::DETAIL_AMP * (0.25 + t::DETAIL_SLOPE_GAIN * steep).min(1.0);
 
         // Rivers: carve a valley down to the bed wherever the river field
         // crosses zero, fading out on mountains so peaks are not sawn in half.
@@ -1130,7 +1270,28 @@ impl TerrainGen {
 
         // Alpine rock, dithered so the treeline is speckled rather than drawn.
         if unit(hash2(self.seed, x, z, t::SALT_ROCK)) < col.rock {
-            col.top = BlockId::STONE;
+            // Which rock. Chosen from a mid-scale noise rather than per column,
+            // so the face breaks into patches of andesite and gravel a few
+            // blocks across instead of salt-and-pepper. A mountainside of one
+            // repeated block is what lets the eye lock on to the staircase; give
+            // it patches and it reads the shape instead of the grid.
+            let v = Self::fbm2(
+                &self.detail,
+                x as f64 - 2200.0,
+                z as f64 + 1700.0,
+                t::ROCK_PATCH_SCALE,
+                2,
+            );
+            let j = unit(hash2(self.seed, x, z, t::SALT_ROCK + 7));
+            // Stone stays the majority; the rest are accents. Granite is left
+            // underground -- exposed, its pink reads as damage rather than rock.
+            let face = match v + (j as f64 - 0.5) * 0.10 {
+                n if n < -0.40 => BlockId::ANDESITE,
+                n if n < -0.22 => BlockId::GRAVEL,
+                n if n > 0.42 => BlockId::DIORITE,
+                _ => BlockId::STONE,
+            };
+            col.top = face;
             col.filler = BlockId::STONE;
             col.filler_depth = 0;
             col.tree = TreeKind::None;
@@ -1522,6 +1683,14 @@ impl TerrainGen {
     fn decoration_at(&self, x: i32, z: i32, col: &Column) -> Option<BlockId> {
         use tuning as t;
         if col.surface < t::WATER_LEVEL || Self::in_spawn_clearing(x, z) {
+            return None;
+        }
+        // Nothing grows over a hole. Decoration is chosen from the column's
+        // surface height, but a cave mouth or a ravine can take that surface
+        // block away underneath it, which leaves a flower hanging in the air
+        // over the opening. The column knows its own height; only the carver
+        // knows whether the block is still there, so it has to be asked.
+        if self.is_carved(x, col.surface, z, col) {
             return None;
         }
         if col.top == BlockId::SAND {
@@ -2165,31 +2334,61 @@ mod tests {
     #[test]
     fn trees_are_continuous_across_chunk_boundaries() {
         let g = TerrainGen::new(1337);
-        let mut world: HashMap<(i32, i32, i32), BlockId> = HashMap::new();
-        for cx in -1..=1 {
-            for cz in -1..=1 {
-                for cy in 3..7 {
-                    let pos = ChunkPos::new(cx, cy, cz);
-                    let c = g.generate(pos);
-                    let (ox, oy, oz) = pos.origin();
-                    for y in 0..CHUNK_SIZE {
-                        for z in 0..CHUNK_SIZE {
-                            for x in 0..CHUNK_SIZE {
-                                let b = c.get(x, y, z);
-                                if !b.is_air() {
-                                    world.insert((ox + x as i32, oy + y as i32, oz + z as i32), b);
+
+        // Stitch a 3x3 column of chunks centred on a chunk origin.
+        let stitch = |cx0: i32, cz0: i32| {
+            let mut world: HashMap<(i32, i32, i32), BlockId> = HashMap::new();
+            for cx in cx0 - 1..=cx0 + 1 {
+                for cz in cz0 - 1..=cz0 + 1 {
+                    for cy in 3..7 {
+                        let pos = ChunkPos::new(cx, cy, cz);
+                        let c = g.generate(pos);
+                        let (ox, oy, oz) = pos.origin();
+                        for y in 0..CHUNK_SIZE {
+                            for z in 0..CHUNK_SIZE {
+                                for x in 0..CHUNK_SIZE {
+                                    let b = c.get(x, y, z);
+                                    if !b.is_air() {
+                                        world.insert(
+                                            (ox + x as i32, oy + y as i32, oz + z as i32),
+                                            b,
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            world
+        };
+
+        // Hunt for somewhere forested rather than assuming the origin is.
+        //
+        // This test is about a property -- a canopy must not be cut in half by a
+        // chunk boundary -- and that property has nothing to do with where the
+        // world happens to put a forest. Pinning it to the origin made it a
+        // tripwire for any change to the terrain shape, which is exactly the
+        // kind of false failure that gets a real test deleted.
+        let mut world = HashMap::new();
+        let mut base = (0i32, 0i32);
+        for &(cx0, cz0) in &[(0, 0), (6, 0), (0, 6), (-6, 4), (12, -8), (-14, -14), (20, 20)] {
+            let candidate = stitch(cx0, cz0);
+            let logs = candidate.values().filter(|b| b.is_log()).count();
+            if logs > 20 {
+                world = candidate;
+                base = (cx0 * CHUNK_SIZE as i32, cz0 * CHUNK_SIZE as i32);
+                break;
+            }
         }
+        assert!(!world.is_empty(), "no forested patch found anywhere to test");
 
         // Only judge trunks well inside the stitched region, so "missing" never
         // means "outside the generated box".
         let inside = |x: i32, y: i32, z: i32| {
-            (-12..12).contains(&x) && (-12..12).contains(&z) && (52..108).contains(&y)
+            (base.0 - 12..base.0 + 12).contains(&x)
+                && (base.1 - 12..base.1 + 12).contains(&z)
+                && (52..108).contains(&y)
         };
 
         let mut trunks = 0;
@@ -2366,6 +2565,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A steep slope must not be a perfectly regular staircase.
+    ///
+    /// This is the artifact that made mountains look like corduroy: a smooth
+    /// heightmap on ground of gradient one rounds to exactly one block of drop
+    /// per block of travel, every time, so the whole face is a repeating
+    /// diagonal ripple of identical blocks. It is invisible in any test that
+    /// looks at heights one at a time and obvious the moment you look at the
+    /// sequence of differences.
+    #[test]
+    fn steep_ground_is_not_a_perfectly_regular_staircase() {
+        let g = TerrainGen::new(4242);
+        let mut worst: Option<(i32, i32, f32, usize)> = None;
+        // Sample long transects and keep the most regular one found.
+        for k in 0..64 {
+            let z = -2000 + k * 61;
+            let x0 = -2000 + k * 37;
+            let hs: Vec<i32> = (0..96).map(|i| g.height_at(x0 + i, z)).collect();
+            let steps: Vec<i32> = hs.windows(2).map(|w| w[1] - w[0]).collect();
+            // Only judge genuinely steep runs; flat ground is allowed to be flat.
+            let drop = (hs[hs.len() - 1] - hs[0]).abs();
+            if drop < 48 {
+                continue;
+            }
+            let distinct = steps.iter().collect::<std::collections::HashSet<_>>().len();
+            let modal = steps
+                .iter()
+                .map(|s| steps.iter().filter(|o| *o == s).count())
+                .max()
+                .unwrap_or(0);
+            let uniformity = modal as f32 / steps.len() as f32;
+            if worst.map(|w| uniformity > w.2).unwrap_or(true) {
+                worst = Some((x0, z, uniformity, distinct));
+            }
+        }
+        let Some((x, z, uniformity, distinct)) = worst else {
+            panic!("no steep transect found to judge");
+        };
+        println!("steepest transect at {x},{z}: {uniformity:.2} uniform, {distinct} distinct steps");
+        assert!(
+            uniformity < 0.75 && distinct >= 3,
+            "slope at {x},{z} is a regular staircase: {:.0}% of steps identical,              only {distinct} distinct step sizes",
+            uniformity * 100.0
+        );
     }
 
     #[test]

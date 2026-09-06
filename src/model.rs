@@ -103,13 +103,19 @@ pub fn humanoid() -> &'static [Part] {
 /// both -- the torso rectangle simply wraps a longer box.
 pub fn quadruped() -> &'static [Part] {
     use texture::*;
+    // Mojang's proportions, in the usual 16-units-to-a-block model space, with
+    // the origin between the feet. These are not eyeballed: a pig is a 10x8x16
+    // barrel on 4x6x4 legs with an 8-cube head, and the reason it reads as a pig
+    // rather than as a pink box on stilts is that the barrel is wide and low and
+    // the legs are stubby. An earlier version here used 8-tall legs and a body
+    // riding at 12, which is the same silhouette a dog would have.
     const PARTS: [Part; 7] = [
         Part {
             channel: Channel::Head,
             uv: QUAD_HEAD_UV,
             size: QUAD_HEAD_SIZE,
             offset: (0.0, 12.0, -10.0),
-            pivot: (0.0, 12.0, -8.0),
+            pivot: (0.0, 12.0, -6.0),
         },
         // A snout is one of the few places geometry genuinely beats texture: a
         // painted-on nose reads as a smudge, a box that sticks out reads as a
@@ -118,44 +124,46 @@ pub fn quadruped() -> &'static [Part] {
             channel: Channel::Head,
             uv: QUAD_SNOUT_UV,
             size: QUAD_SNOUT_SIZE,
-            offset: (0.0, 10.0, -15.0),
-            pivot: (0.0, 12.0, -8.0),
+            offset: (0.0, 10.5, -14.5),
+            pivot: (0.0, 12.0, -6.0),
         },
         Part {
             channel: Channel::Body,
             uv: QUAD_BODY_UV,
             size: QUAD_BODY_SIZE,
-            offset: (0.0, 12.0, 0.0),
-            pivot: (0.0, 12.0, 0.0),
+            offset: (0.0, 10.0, 0.0),
+            pivot: (0.0, 10.0, 0.0),
         },
         // Front pair, driven by the arm channels so they swing with the gait.
+        // The back pair sits further back than the front pair is forward, which
+        // is Mojang's asymmetry and is what gives the animal a rump.
         Part {
             channel: Channel::ArmRight,
             uv: QUAD_LEG_UV,
             size: QUAD_LEG_SIZE,
-            offset: (-3.0, 4.0, -5.0),
-            pivot: (-3.0, 8.0, -5.0),
+            offset: (-3.0, 3.0, -5.0),
+            pivot: (-3.0, 6.0, -5.0),
         },
         Part {
             channel: Channel::ArmLeft,
             uv: QUAD_LEG_UV,
             size: QUAD_LEG_SIZE,
-            offset: (3.0, 4.0, -5.0),
-            pivot: (3.0, 8.0, -5.0),
+            offset: (3.0, 3.0, -5.0),
+            pivot: (3.0, 6.0, -5.0),
         },
         Part {
             channel: Channel::LegRight,
             uv: QUAD_LEG_UV,
             size: QUAD_LEG_SIZE,
-            offset: (-3.0, 4.0, 5.0),
-            pivot: (-3.0, 8.0, 5.0),
+            offset: (-3.0, 3.0, 7.0),
+            pivot: (-3.0, 6.0, 7.0),
         },
         Part {
             channel: Channel::LegLeft,
             uv: QUAD_LEG_UV,
             size: QUAD_LEG_SIZE,
-            offset: (3.0, 4.0, 5.0),
-            pivot: (3.0, 8.0, 5.0),
+            offset: (3.0, 3.0, 7.0),
+            pivot: (3.0, 6.0, 7.0),
         },
     ];
     &PARTS

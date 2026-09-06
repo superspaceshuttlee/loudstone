@@ -320,6 +320,9 @@ pub struct CameraUniform {
     /// `x`: 1.0 when the shader must encode linear -> sRGB itself because the
     /// swapchain format is not an sRGB one. The rest is spare.
     pub params: [f32; 4],
+    /// `xyz`: unit vector pointing at the sun, world space. `w`: how much
+    /// directional light it casts, 0 at night and 1 at noon.
+    pub sun: [f32; 4],
 }
 
 impl CameraUniform {
@@ -329,6 +332,7 @@ impl CameraUniform {
         fog_start: f32,
         fog_end: f32,
         encode_srgb: bool,
+        sun: [f32; 4],
     ) -> Self {
         Self {
             view_proj: cam.view_proj().to_cols_array_2d(),
@@ -337,6 +341,7 @@ impl CameraUniform {
             sky_color: sky_linear,
             fog_end,
             params: [if encode_srgb { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            sun,
         }
     }
 }

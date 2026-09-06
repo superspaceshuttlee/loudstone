@@ -520,7 +520,7 @@ impl Renderer {
     ///
     /// `sky` is an ordinary sRGB colour; converting it to the linear values the
     /// shader and the clear both want happens here, in one place.
-    pub fn render(&mut self, cam: &Camera, sky: [f32; 3]) {
+    pub fn render(&mut self, cam: &Camera, sky: [f32; 3], sun: [f32; 4]) {
         let far = render_distance_blocks();
         let sky_linear = srgb_to_linear(sky);
         let uniform = CameraUniform::new(
@@ -529,6 +529,7 @@ impl Renderer {
             far * FOG_START_FRAC,
             far * FOG_END_FRAC,
             self.encode_srgb,
+            sun,
         );
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&[uniform]));

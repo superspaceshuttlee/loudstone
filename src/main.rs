@@ -111,6 +111,31 @@ fn daylight_at(time_of_day: f32) -> f32 {
     .clamp(0.0, 1.0)
 }
 
+/// Where the sun is, and how hard it is shining.
+///
+/// Returned as a direction *toward* the sun plus a strength, which is what the
+/// shader wants. The arc is tilted rather than passing straight overhead: a sun
+/// that crosses the exact zenith lights every upward face identically at noon
+/// and flattens the whole landscape for the middle third of the day.
+///
+/// At night the direction is kept pointing at where the sun will rise instead of
+/// being zeroed, so that nothing has to divide by a zero-length vector; the
+/// strength is what actually turns the light off.
+fn sun_for(time_of_day: f32) -> [f32; 4] {
+    let t = (time_of_day / DAY_LENGTH).fract();
+    // Sunrise at the start of the day arc, sunset at its end.
+    let angle = std::f32::consts::PI * (t / DAY_FRACTION).clamp(0.0, 1.0);
+    let tilt = 0.42;
+    let dir = Vec3::new(
+        angle.cos(),
+        angle.sin() * (1.0 - tilt) + tilt * 0.35,
+        -tilt * 1.15,
+    )
+    .normalize();
+    let strength = daylight_at(time_of_day);
+    [dir.x, dir.y, dir.z, strength]
+}
+
 fn sky_for(daylight: f32) -> [f32; 3] {
     let mut out = [0.0; 3];
     for i in 0..3 {
@@ -150,11 +175,12 @@ fn append_mob_model(
         on_all_fours: m.kind == mob::MobKind::Pig,
     };
 
-    // A pig is a humanoid on all fours in this rig: shorter and tipped forward.
-    let scale = match m.kind {
-        mob::MobKind::Pig => 0.8,
-        _ => 1.0,
-    };
+    // Every rig is built at true scale now. The pig used to be drawn at 0.8
+    // because it was a humanoid bent over on all fours and needed shrinking to
+    // pass; the real quadruped rig is 14 units tall, which is the 0.875 blocks a
+    // pig is supposed to be, and shrinking it again would leave it rattling
+    // around inside its own hitbox.
+    let scale = 1.0;
 
     let parts = if m.kind == mob::MobKind::Pig {
         model::quadruped()
@@ -419,6 +445,9 @@ struct App {
     ui_demo: Option<String>,
     /// `--model zombie`: stage one model close to the camera for visual QA.
     model_demo: Option<String>,
+    /// `--vista`: put the camera on high ground and look out, for judging the
+    /// shape of the terrain rather than the block under your feet.
+    vista: bool,
     /// `--gauntlet`: a robot plays the game and reports what broke.
     gauntlet: Option<gauntlet::Harness>,
     /// Block ids mined and placed this frame, for coverage tracking.
@@ -494,7 +523,7 @@ impl App {
         let automated = std::env::args().any(|arg| {
             matches!(
                 arg.as_str(),
-                "--shot" | "--demo" | "--ui" | "--model" | "--gauntlet"
+                "--shot" | "--demo" | "--ui" | "--model" | "--gauntlet" | "--vista"
             )
         });
         let force_title = std::env::args().any(|arg| arg == "--title");
@@ -558,6 +587,7 @@ impl App {
                 .nth(1)
                 .map(std::path::PathBuf::from),
             demo: std::env::args().any(|a| a == "--demo"),
+            vista: std::env::args().any(|a| a == "--vista"),
             models_review: std::env::args().any(|a| a == "--models"),
             review_angle: std::env::args()
                 .skip_while(|a| a != "--angle")
@@ -925,6 +955,45 @@ impl App {
 
     /// Stage the two headline mechanics in front of the camera so a single
     /// captured frame shows both: a chipped crater, and mobs standing near it.
+    /// Stand somewhere high and look out over the land.
+    ///
+    /// There was previously no way to look at the terrain except to play the
+    /// game and walk somewhere with a view, which meant that every judgement
+    /// about the *shape* of the world -- whether ridges ripple, whether slopes
+    /// terrace, whether mountains are landmarks or wallpaper -- depended on the
+    /// player happening to stand in the right place. Those are exactly the
+    /// questions a screenshot answers instantly and a close-up never does.
+    fn run_vista(&mut self) {
+        // Search a spiral of columns for the highest ground within reach, so the
+        // camera is not aimed at the inside of a hill.
+        let mut best = (0i32, 0i32, i32::MIN);
+        let mut r = 0i32;
+        while r < 220 {
+            r += 20;
+            for k in 0..24 {
+                let a = k as f32 * std::f32::consts::TAU / 24.0;
+                let (x, z) = ((a.cos() * r as f32) as i32, (a.sin() * r as f32) as i32);
+                let y = self.world.surface_y(x, z);
+                if y > best.2 {
+                    best = (x, z, y);
+                }
+            }
+        }
+        let (bx, bz, by) = best;
+        // Back off from the summit and rise above it: standing exactly on a peak
+        // fills half the frame with the peak.
+        let eye = Vec3::new(bx as f32 + 0.5, by as f32 + 10.0, bz as f32 + 0.5);
+        self.player.pos = eye;
+        self.player.vel = Vec3::ZERO;
+        self.player.noclip = true;
+        self.camera.pos = eye;
+        // Face the world origin, tilted down enough to hold both land and sky.
+        self.camera.yaw = (-(bz as f32)).atan2(-(bx as f32));
+        self.camera.pitch = -0.42;
+        self.time_of_day = DAY_LENGTH * 0.14;
+        println!("[vista] camera at {bx}, {}, {bz}", by + 10);
+    }
+
     fn run_demo(&mut self) {
         let eye = self.camera.pos;
         let fwd = Vec3::new(self.camera.yaw.cos(), 0.0, self.camera.yaw.sin());
@@ -1518,7 +1587,7 @@ impl App {
 
         if self.ui == Ui::Title {
             draw_title_screen(gfx, self.has_save, self.cursor);
-            gfx.render(&self.camera, [0.025, 0.045, 0.075]);
+            gfx.render(&self.camera, [0.025, 0.045, 0.075], sun_for(0.0));
             return;
         }
 
@@ -1584,7 +1653,7 @@ impl App {
             );
         }
 
-        gfx.render(&self.camera, sky);
+        gfx.render(&self.camera, sky, sun_for(self.time_of_day));
     }
 }
 
@@ -2267,6 +2336,9 @@ impl ApplicationHandler for App {
                         if self.shot_countdown == 60 {
                             if self.models_review {
                                 self.run_model_review();
+                            }
+                            if self.vista {
+                                self.run_vista();
                             }
                             if self.demo {
                                 self.run_demo();
