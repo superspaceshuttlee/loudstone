@@ -16,6 +16,68 @@ use winit::window::Window;
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+
+/// A GPU buffer that is written every frame and only reallocated when it needs
+/// to grow.
+///
+/// This exists because the naive thing -- `create_buffer_init` per frame --
+/// killed the game. Mob geometry was rebuilt every frame and the selection box
+/// every time the crosshair moved to another block, so the renderer was
+/// creating thousands of buffers a second. wgpu frees them lazily, the device
+/// eventually cannot satisfy another allocation, and from then on every
+/// `create_buffer_init` hands back an invalid buffer whose `get_mapped_range`
+/// panics. The randomised playtest found it as a hard crash after 87 seconds,
+/// preceded by the frame rate falling to 11 fps as the allocator thrashed.
+struct DynBuffer {
+    buf: wgpu::Buffer,
+    capacity: u64,
+    usage: wgpu::BufferUsages,
+    label: &'static str,
+}
+
+impl DynBuffer {
+    fn new(device: &wgpu::Device, label: &'static str, usage: wgpu::BufferUsages) -> Self {
+        let capacity = 64 * 1024;
+        Self {
+            buf: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: capacity,
+                usage: usage | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            capacity,
+            usage,
+            label,
+        }
+    }
+
+    /// Write `bytes`, growing (by doubling) only when they no longer fit.
+    fn write(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, bytes: &[u8]) {
+        // wgpu requires a multiple of 4 for a buffer write.
+        let padded = (bytes.len() as u64).div_ceil(4) * 4;
+        if padded > self.capacity {
+            let mut cap = self.capacity;
+            while cap < padded {
+                cap *= 2;
+            }
+            self.capacity = cap;
+            self.buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(self.label),
+                size: cap,
+                usage: self.usage | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if padded == bytes.len() as u64 {
+            queue.write_buffer(&self.buf, 0, bytes);
+        } else {
+            let mut padded_bytes = bytes.to_vec();
+            padded_bytes.resize(padded as usize, 0);
+            queue.write_buffer(&self.buf, 0, &padded_bytes);
+        }
+    }
+}
+
 /// GPU buffers for one chunk's mesh.
 pub struct ChunkMesh {
     vbuf: wgpu::Buffer,
@@ -34,14 +96,20 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    atlas_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
     meshes: HashMap<ChunkPos, ChunkMesh>,
-    /// Rebuilt only when the targeted block changes.
-    highlight: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    /// The selection box. Persistent buffers, rewritten when the target moves.
+    highlight_v: DynBuffer,
+    highlight_i: DynBuffer,
+    highlight_count: u32,
     highlight_at: Option<(i32, i32, i32)>,
-    /// Mobs and other moving geometry, rebuilt every frame and never frustum
-    /// culled as a unit -- it is one small buffer covering the whole scene.
-    entities: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    /// Mobs and other moving geometry, rewritten every frame into persistent
+    /// buffers and never frustum culled as a unit -- it is one small batch
+    /// covering the whole scene.
+    entity_v: DynBuffer,
+    entity_i: DynBuffer,
+    entity_count: u32,
     /// True when the swapchain is not an sRGB format and the shader must encode.
     encode_srgb: bool,
     /// The overlay. Owned here so a frame is recorded in one place; call
@@ -133,6 +201,92 @@ impl Renderer {
             }],
         });
 
+        // The block atlas: one 16x16-texel tile per surface, generated in code
+        // at startup with its own mip chain. Magnification is nearest so the
+        // pixel art stays crisp; minification is linear across mips so distant
+        // terrain does not shimmer.
+        let atlas = crate::texture::atlas();
+        let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("block atlas"),
+            size: wgpu::Extent3d {
+                width: crate::texture::ATLAS_W as u32,
+                height: crate::texture::ATLAS_H as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: atlas.levels.len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (level, (w, h, data)) in atlas.levels.iter().enumerate() {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &atlas_tex,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(*h),
+                },
+                wgpu::Extent3d {
+                    width: *w,
+                    height: *h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("block atlas sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("atlas layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atlas bind group"),
+            layout: &atlas_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -140,7 +294,7 @@ impl Renderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
+            bind_group_layouts: &[Some(&bind_layout), Some(&atlas_layout)],
             immediate_size: 0,
         });
 
@@ -184,6 +338,10 @@ impl Renderer {
 
         let depth_view = create_depth(&device, &config);
         let hud = Hud::with_depth(&device, format, Some(DEPTH_FORMAT));
+        let highlight_v = DynBuffer::new(&device, "highlight vbuf", wgpu::BufferUsages::VERTEX);
+        let highlight_i = DynBuffer::new(&device, "highlight ibuf", wgpu::BufferUsages::INDEX);
+        let entity_v = DynBuffer::new(&device, "entity vbuf", wgpu::BufferUsages::VERTEX);
+        let entity_i = DynBuffer::new(&device, "entity ibuf", wgpu::BufferUsages::INDEX);
 
         Self {
             surface,
@@ -194,11 +352,16 @@ impl Renderer {
             pipeline,
             camera_buf,
             camera_bind_group,
+            atlas_bind_group,
             depth_view,
             meshes: HashMap::new(),
-            highlight: None,
+            highlight_v,
+            highlight_i,
+            highlight_count: 0,
             highlight_at: None,
-            entities: None,
+            entity_v,
+            entity_i,
+            entity_count: 0,
             encode_srgb,
             hud,
             drawn_indices: 0,
@@ -283,25 +446,13 @@ impl Renderer {
 
     /// Replace the per-frame entity geometry (mobs, projectiles). Empty clears it.
     pub fn set_entities(&mut self, verts: &[Vertex], indices: &[u32]) {
+        self.entity_count = indices.len() as u32;
         if indices.is_empty() {
-            self.entities = None;
             return;
         }
-        let vbuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("entity vbuf"),
-                contents: bytemuck::cast_slice(verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let ibuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("entity ibuf"),
-                contents: bytemuck::cast_slice(indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-        self.entities = Some((vbuf, ibuf, indices.len() as u32));
+        let (device, queue) = (&self.device, &self.queue);
+        self.entity_v.write(device, queue, bytemuck::cast_slice(verts));
+        self.entity_i.write(device, queue, bytemuck::cast_slice(indices));
     }
 
     /// Build an axis-aligned coloured box. Mobs are drawn as a body and a head,
@@ -312,6 +463,7 @@ impl Renderer {
         min: glam::Vec3,
         max: glam::Vec3,
         color: [f32; 3],
+        tile: crate::texture::TileId,
     ) {
         push_box_shaded(
             verts,
@@ -319,34 +471,26 @@ impl Renderer {
             [min.x, min.y, min.z],
             [max.x - min.x, max.y - min.y, max.z - min.z],
             color,
+            tile,
         );
     }
 
-    /// Point the selection box at a block, or clear it with `None`. Rebuilds the
-    /// buffers only when the target actually changes, so holding still is free.
+    /// Point the selection box at a block, or clear it with `None`. Rebuilds
+    /// only when the target actually changes, so holding still costs nothing.
     pub fn set_highlight(&mut self, block: Option<(i32, i32, i32)>) {
         if self.highlight_at == block {
             return;
         }
         self.highlight_at = block;
-        self.highlight = block.map(|(x, y, z)| {
-            let (verts, indices) = wire_box(x as f32, y as f32, z as f32);
-            let vbuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("highlight vbuf"),
-                    contents: bytemuck::cast_slice(&verts),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let ibuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("highlight ibuf"),
-                    contents: bytemuck::cast_slice(&indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-            (vbuf, ibuf, indices.len() as u32)
-        });
+        let Some((x, y, z)) = block else {
+            self.highlight_count = 0;
+            return;
+        };
+        let (verts, indices) = wire_box(x as f32, y as f32, z as f32);
+        self.highlight_count = indices.len() as u32;
+        let (device, queue) = (&self.device, &self.queue);
+        self.highlight_v.write(device, queue, bytemuck::cast_slice(&verts));
+        self.highlight_i.write(device, queue, bytemuck::cast_slice(&indices));
     }
 
     /// Draw one frame. Surface loss and resize races are handled here rather than
@@ -426,6 +570,7 @@ impl Renderer {
 
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(1, &self.atlas_bind_group, &[]);
 
             // Chunk meshes are already in world space, so there is no per-chunk
             // transform: one pipeline, one bind group, one draw call per chunk.
@@ -441,17 +586,17 @@ impl Renderer {
                 drawn_chunks += 1;
             }
 
-            if let Some((vbuf, ibuf, count)) = &self.entities {
-                pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..*count, 0, 0..1);
-                drawn_indices += *count;
+            if self.entity_count > 0 {
+                pass.set_vertex_buffer(0, self.entity_v.buf.slice(..));
+                pass.set_index_buffer(self.entity_i.buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.entity_count, 0, 0..1);
+                drawn_indices += self.entity_count;
             }
 
-            if let Some((vbuf, ibuf, count)) = &self.highlight {
-                pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..*count, 0, 0..1);
+            if self.highlight_count > 0 {
+                pass.set_vertex_buffer(0, self.highlight_v.buf.slice(..));
+                pass.set_index_buffer(self.highlight_i.buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.highlight_count, 0, 0..1);
             }
 
             // The overlay shares this pass so there is no second clear; its own
@@ -649,6 +794,7 @@ fn push_box(
                 pos: corners[i],
                 color: HIGHLIGHT_COLOR,
                 light: 1.0,
+                uv: white_uv(),
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -656,12 +802,20 @@ fn push_box(
 }
 
 /// A box with per-face shading, so an untextured mob still reads as a solid.
+/// The atlas coordinate of the plain white tile, for geometry that carries its
+/// own colour and wants the texture to contribute nothing.
+fn white_uv() -> [f32; 2] {
+    let r = crate::texture::tile_uv_rect(crate::texture::T_WHITE);
+    [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5]
+}
+
 fn push_box_shaded(
     verts: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
     origin: [f32; 3],
     size: [f32; 3],
     color: [f32; 3],
+    tile: crate::texture::TileId,
 ) {
     let p = |xh: bool, yh: bool, zh: bool| {
         [
@@ -690,12 +844,21 @@ fn push_box_shaded(
     ];
     for (fi, f) in FACES.iter().enumerate() {
         let light = crate::config::FACE_SHADE[fi];
+        let rect = crate::texture::tile_uv_rect(tile);
         let base = verts.len() as u32;
-        for &i in f {
+        for (k, &i) in f.iter().enumerate() {
+            // A box has no per-corner UV convention of its own, so the four
+            // corners simply walk the tile.
+            const BOX_UV: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+            let c = BOX_UV[k];
             verts.push(Vertex {
                 pos: corners[i],
                 color,
                 light,
+                uv: [
+                    rect[0] + (rect[2] - rect[0]) * c[0],
+                    rect[1] + (rect[3] - rect[1]) * c[1],
+                ],
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

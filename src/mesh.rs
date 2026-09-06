@@ -33,11 +33,14 @@ pub struct Vertex {
     pub color: [f32; 3],
     /// Combined face shade and ambient occlusion, already multiplied.
     pub light: f32,
+    /// Atlas coordinates. Textures multiply the colour and the light rather
+    /// than replacing either, so ambient occlusion and torchlight survive.
+    pub uv: [f32; 2],
 }
 
 impl Vertex {
-    pub const ATTRS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32];
+    pub const ATTRS: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Float32x2];
 
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -274,6 +277,29 @@ pub const FACE_NORMALS: [[i32; 3]; 6] = [
     [-1, 0, 0], // -X
 ];
 
+/// Where a unit-cube corner lands in its face's texture, before the tile rect
+/// is applied. `v` runs downward like an image row, so side faces map `v = 0`
+/// to the top of the block -- which is what puts the grass fringe on a grass
+/// side, and the bark the right way up on a log.
+fn face_uv(face: usize, c: [f32; 3]) -> [f32; 2] {
+    match face {
+        0 => [c[0], c[2]],           // +Y top
+        1 => [c[0], 1.0 - c[2]],     // -Y bottom
+        2 => [1.0 - c[0], 1.0 - c[1]], // +Z
+        3 => [c[0], 1.0 - c[1]],     // -Z
+        4 => [c[2], 1.0 - c[1]],     // +X
+        _ => [1.0 - c[2], 1.0 - c[1]], // -X
+    }
+}
+
+/// Map a face-local UV into a tile of the atlas.
+fn tile_uv(rect: [f32; 4], uv: [f32; 2]) -> [f32; 2] {
+    [
+        rect[0] + (rect[2] - rect[0]) * uv[0],
+        rect[1] + (rect[3] - rect[1]) * uv[1],
+    ]
+}
+
 /// Corner offsets for each face, counter-clockwise seen from **outside** the
 /// cube. `unit_cube_edges` in `gfx.rs` and the winding test below both depend on
 /// this staying true: cross(v1 - v0, v2 - v0) must point along the face normal.
@@ -344,6 +370,7 @@ fn push_quad(
     corners: [[f32; 3]; 4],
     color: [f32; 3],
     light: [f32; 4],
+    uvs: [[f32; 2]; 4],
 ) {
     let base = verts.len() as u32;
     for (i, c) in corners.iter().enumerate() {
@@ -351,6 +378,7 @@ fn push_quad(
             pos: *c,
             color,
             light: light[i],
+            uv: uvs[i],
         });
     }
     // Flip the triangle split along the darker diagonal, otherwise strong AO
@@ -363,6 +391,12 @@ fn push_quad(
     }
 }
 
+/// Textures now carry a block's colour, so the vertex tint must be neutral --
+/// multiplying the atlas by the old flat colour would square it and turn every
+/// surface muddy. The tint stays in the vertex format because biome-tinted
+/// foliage will want it.
+const NO_TINT: [f32; 3] = [1.0, 1.0, 1.0];
+
 fn emit_full_block(
     nb: &Neighborhood,
     verts: &mut Vec<Vertex>,
@@ -372,7 +406,7 @@ fn emit_full_block(
     z: i32,
     id: BlockId,
 ) {
-    let color = id.color();
+    let color = NO_TINT;
     let (ox, oy, oz) = nb.origin;
     // Leaves, water and plants are non-opaque, so they do not occlude their
     // neighbours -- but two of the SAME non-opaque block share an invisible
@@ -389,9 +423,11 @@ fn emit_full_block(
             continue;
         }
         let shade = FACE_SHADE[f];
+        let rect = crate::texture::tile_uv_rect(crate::texture::block_tile(id, f));
         let (t, b) = tangents(*n);
         let mut light = [0.0f32; 4];
         let mut corners = [[0.0f32; 3]; 4];
+        let mut uvs = [[0.0f32; 2]; 4];
         let np = [x + n[0], y + n[1], z + n[2]];
         for (i, c) in FACE_CORNERS[f].iter().enumerate() {
             // World space, not chunk space: the renderer applies no transform.
@@ -400,6 +436,7 @@ fn emit_full_block(
                 (oy + y) as f32 + c[1],
                 (oz + z) as f32 + c[2],
             ];
+            uvs[i] = tile_uv(rect, face_uv(f, *c));
             // Which side of each tangent axis this corner sits on.
             let du = if dot_sign(*c, t) { 1 } else { -1 };
             let dv = if dot_sign(*c, b) { 1 } else { -1 };
@@ -419,7 +456,7 @@ fn emit_full_block(
             let lit = nb.corner_light([np, side1, side2, diag]);
             light[i] = shade * corner_ao(s1, s2, cn) * lit;
         }
-        push_quad(verts, indices, corners, color, light);
+        push_quad(verts, indices, corners, color, light, uvs);
     }
 }
 
@@ -444,7 +481,7 @@ fn emit_subvoxel_block(
     id: BlockId,
     mask: &SubMask,
 ) {
-    let color = id.color();
+    let color = NO_TINT;
     let s = 1.0 / SUBVOX as f32;
     let n = SUBVOX as i32;
     let (ox, oy, oz) = nb.origin;
@@ -480,19 +517,30 @@ fn emit_subvoxel_block(
                     if hidden {
                         continue;
                     }
+                    let rect = crate::texture::tile_uv_rect(crate::texture::block_tile(id, f));
                     let mut corners = [[0.0f32; 3]; 4];
+                    let mut uvs = [[0.0f32; 2]; 4];
                     for (i, c) in FACE_CORNERS[f].iter().enumerate() {
-                        corners[i] = [
-                            (ox + x) as f32 + (sx as f32 + c[0]) * s,
-                            (oy + y) as f32 + (sy as f32 + c[1]) * s,
-                            (oz + z) as f32 + (sz as f32 + c[2]) * s,
+                        // Block-local position, so the texture reads as one
+                        // continuous surface across a chipped face rather than
+                        // repeating on every sub-voxel.
+                        let local = [
+                            (sx as f32 + c[0]) * s,
+                            (sy as f32 + c[1]) * s,
+                            (sz as f32 + c[2]) * s,
                         ];
+                        corners[i] = [
+                            (ox + x) as f32 + local[0],
+                            (oy + y) as f32 + local[1],
+                            (oz + z) as f32 + local[2],
+                        ];
+                        uvs[i] = tile_uv(rect, face_uv(f, local));
                     }
                     // Carved surfaces take a flat shade; per-sub-voxel AO is not
                     // worth the cost at this scale.
                     let lit = if inside { interior_light } else { face_light[f] };
                     let l = FACE_SHADE[f] * CARVE_SHADE * lit;
-                    push_quad(verts, indices, corners, color, [l, l, l, l]);
+                    push_quad(verts, indices, corners, color, [l, l, l, l], uvs);
                 }
             }
         }

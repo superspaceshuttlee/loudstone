@@ -1,9 +1,9 @@
-// Loudstone terrain shader. Flat per-block colour, modulated by baked face shade
-// and ambient occlusion, then faded into the sky by distance fog.
+// Loudstone terrain shader. Samples the generated block atlas, modulates it by
+// baked face shade, ambient occlusion and voxel light, then fades into the sky.
 //
 // All mixing happens in LINEAR space. Blending fog in sRGB space is the classic
-// way to get a washed-out, milky horizon, because a 50% mix of two sRGB values is
-// much brighter than the true half-way colour.
+// way to get a washed-out, milky horizon, because a 50% mix of two sRGB values
+// is much brighter than the true half-way colour.
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
@@ -17,11 +17,14 @@ struct CameraUniform {
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
+@group(1) @binding(0) var atlas_tex: texture_2d<f32>;
+@group(1) @binding(1) var atlas_samp: sampler;
 
 struct VertexInput {
     @location(0) pos: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) light: f32,
+    @location(3) uv: vec2<f32>,
 };
 
 struct VertexOutput {
@@ -29,6 +32,7 @@ struct VertexOutput {
     @location(0) color: vec3<f32>,
     @location(1) light: f32,
     @location(2) world_pos: vec3<f32>,
+    @location(3) uv: vec2<f32>,
 };
 
 @vertex
@@ -38,13 +42,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.color = in.color;
     out.light = in.light;
     out.world_pos = in.pos;
+    out.uv = in.uv;
     return out;
-}
-
-fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
-    let lo = c / 12.92;
-    let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-    return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
@@ -55,9 +54,18 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Block colours are authored as sRGB swatches; lighting is a physical
-    // quantity, so it must scale linear intensity, not encoded values.
-    let albedo = srgb_to_linear(in.color);
+    // The atlas is an sRGB texture, so the sample arrives already linear.
+    let tex = textureSample(atlas_tex, atlas_samp, in.uv);
+
+    // Cut-out transparency for leaves and plants. Discarding rather than
+    // blending keeps the terrain pass opaque, so nothing needs sorting.
+    if (tex.a < 0.5) {
+        discard;
+    }
+
+    // Texture MULTIPLIES the vertex colour, so per-block tinting (biome grass,
+    // for one) still works, and light still scales the result.
+    let albedo = tex.rgb * in.color;
     let lit = albedo * in.light;
 
     // Horizontal-only distance, so looking up or down does not slide the fog band.

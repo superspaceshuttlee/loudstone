@@ -116,9 +116,9 @@ pub const COLLIDE_EPSILON: f32 = 1.0e-4;
 /// Maximum block-picking distance, in blocks.
 pub const REACH: f32 = 6.0;
 /// Radius of a chip pulse, in sub-voxels.
-pub const CHIP_RADIUS: f32 = 2.2;
+pub const CHIP_RADIUS: f32 = 2.7;
 /// Seconds between chip pulses for a hardness-1.0 block. Scales with hardness.
-pub const CHIP_INTERVAL: f32 = 0.06;
+pub const CHIP_INTERVAL: f32 = 0.055;
 /// Seconds to charge a full-block smash on a hardness-1.0 block.
 pub const SMASH_CHARGE: f32 = 0.30;
 /// Seconds between block placements while the right button is held.

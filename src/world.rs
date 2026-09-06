@@ -616,6 +616,89 @@ impl World {
     /// Chip a small sphere of sub-voxels out around a hit point. `radius` is in
     /// sub-voxels. Returns how many sub-voxels were actually removed, so the
     /// caller can tell a real bite out of the wall from a wasted swing.
+    /// Chip material out of one specific block, eroding it from whichever
+    /// surviving sub-voxel sits closest to where the player is aiming.
+    ///
+    /// This is what makes mining feel deliberate, and it took two attempts.
+    /// `chip_sphere` carves in world sub-voxel space, so its sphere spills into
+    /// whatever blocks are adjacent: hold the button and you gouge a mushy bowl
+    /// across half a wall, with blocks popping in an order you did not choose.
+    /// Simply confining that sphere to one block is not enough either -- the ray
+    /// drills a clean tunnel through the middle, stops hitting the block at all,
+    /// and moves on to the one behind, leaving a doughnut standing.
+    ///
+    /// So the carve is anchored to the nearest remaining material rather than to
+    /// the ray's contact point. The block erodes from the face inward and is
+    /// always finished before anything else is touched, while the sub-voxel
+    /// progress stays visible the whole way down.
+    ///
+    /// Explosions keep using the unconfined [`World::chip_sphere`]: a crater
+    /// SHOULD span blocks. Mining should not.
+    pub fn chip_block(&mut self, block: (i32, i32, i32), aim: Vec3, radius: f32) -> u32 {
+        let (bx, by, bz) = block;
+        let id = self.block_at(bx, by, bz);
+        if id.is_air() || id.hardness().is_infinite() {
+            return 0;
+        }
+
+        // Nearest surviving sub-voxel to the aim point, in sub-voxel units.
+        let origin = Vec3::new(bx as f32, by as f32, bz as f32);
+        let local = (aim - origin) * SUBVOX_F;
+        let mut best = None;
+        let mut best_d2 = f32::INFINITY;
+        for sy in 0..SUBVOX {
+            for sz in 0..SUBVOX {
+                for sx in 0..SUBVOX {
+                    if !self.sub_solid(bx, by, bz, sx, sy, sz) {
+                        continue;
+                    }
+                    let c = Vec3::new(sx as f32 + 0.5, sy as f32 + 0.5, sz as f32 + 0.5);
+                    let d2 = (c - local).length_squared();
+                    if d2 < best_d2 {
+                        best_d2 = d2;
+                        best = Some((sx as i32, sy as i32, sz as i32));
+                    }
+                }
+            }
+        }
+        let Some((cx, cy, cz)) = best else {
+            return 0;
+        };
+
+        let r = radius.ceil() as i32;
+        let r2 = radius * radius;
+        let mut removed = 0u32;
+        for dy in -r..=r {
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    if (dx * dx + dy * dy + dz * dz) as f32 > r2 {
+                        continue;
+                    }
+                    let (sx, sy, sz) = (cx + dx, cy + dy, cz + dz);
+                    if !(0..SUBVOX_I).contains(&sx)
+                        || !(0..SUBVOX_I).contains(&sy)
+                        || !(0..SUBVOX_I).contains(&sz)
+                    {
+                        continue;
+                    }
+                    let (sx, sy, sz) = (sx as usize, sy as usize, sz as usize);
+                    if !self.sub_solid(bx, by, bz, sx, sy, sz) {
+                        continue;
+                    }
+                    self.carve(bx, by, bz, sx, sy, sz);
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            self.push_noise(NoiseEvent {
+                pos: origin + Vec3::splat(0.5),
+                loudness: NOISE_CHIP,
+            });
+        }
+        removed
+    }
+
     pub fn chip_sphere(&mut self, hit: &RayHit, radius: f32) -> u32 {
         let (bx, by, bz) = hit.block;
         let (sx, sy, sz) = hit.sub;

@@ -7,9 +7,34 @@
 //! block silently rewrites every save that mentions it. New blocks are appended
 //! from 18 upward and never inserted in the middle.
 
+// `main.rs` owns the crate's module list and is not this agent's file to edit,
+// so the procedural texture module is attached here with an explicit path. It is
+// pure data -- no wgpu, no file loading -- which is why it hangs off the block
+// table rather than off the renderer. The integrator can promote it to a plain
+// `mod texture;` in `main.rs` and delete these two lines; nothing else changes
+// except the `crate::block::texture` paths.
+#[path = "texture.rs"]
+pub mod texture;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 #[repr(transparent)]
 pub struct BlockId(pub u8);
+
+/// How the mesher and the renderer must treat a block's geometry.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum RenderKind {
+    /// A full cube, fully opaque texels, drawn in the depth-writing pass.
+    Solid,
+    /// A full cube whose texture has holes: leaves. Alpha-cut, drawn with
+    /// back faces kept so a canopy is not see-through.
+    Cutout,
+    /// Two intersecting vertical quads: tall grass, flowers, dead bush.
+    Cross,
+    /// A thin standing post, textured from a narrow column of its tile.
+    Post,
+    /// Translucent, blended, drawn last and without writing depth.
+    Water,
+}
 
 impl BlockId {
     pub const AIR: BlockId = BlockId(0);
@@ -170,12 +195,37 @@ impl BlockId {
         )
     }
 
-    /// Base RGB. Visuals are deliberately flat -- shading comes from AO and sun angle.
+    /// How this block is built into geometry and which pass draws it.
     ///
-    /// The mesher draws every block as a full cube, so the cross-shaped plants
-    /// (tall grass, flowers, dead bush) render as solid cubes for now. Their
-    /// colours are therefore chosen to sit close to the ground they grow on:
-    /// a meadow reads as mottled grass rather than as a field of markers.
+    /// Ground cover is a cross of two quads rather than a cube -- a flower
+    /// rendered as a full block is a slab of pink, which is what this replaces.
+    /// Leaves stay cubes but are alpha-cut, and water is the only translucent
+    /// thing in the world.
+    #[inline]
+    pub fn render_kind(self) -> RenderKind {
+        match self {
+            BlockId::WATER => RenderKind::Water,
+            BlockId::LEAVES | BlockId::BIRCH_LEAVES | BlockId::SPRUCE_LEAVES => RenderKind::Cutout,
+            BlockId::TALL_GRASS
+            | BlockId::FLOWER_RED
+            | BlockId::FLOWER_YELLOW
+            | BlockId::DEAD_BUSH => RenderKind::Cross,
+            BlockId::TORCH => RenderKind::Post,
+            _ => RenderKind::Solid,
+        }
+    }
+
+    /// True for the ground cover that draws as two crossed quads.
+    #[inline]
+    pub fn is_cross(self) -> bool {
+        self.render_kind() == RenderKind::Cross
+    }
+
+    /// Base RGB. With textures in place this is the *tint* multiplied over the
+    /// atlas sample, not the whole story: almost every block now carries its
+    /// colour in its texture and tints white. The values are kept because
+    /// `item.rs`, `hud.rs` and the map/debug readouts all still ask for a
+    /// representative colour per block.
     pub fn color(self) -> [f32; 3] {
         match self {
             BlockId::STONE => [0.50, 0.50, 0.53],

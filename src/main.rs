@@ -6,6 +6,7 @@
 //! Chipping is slow and quiet. Smashing a whole block out is fast and loud.
 //! Every mining decision is therefore a bet on speed against safety.
 
+mod audio;
 mod block;
 mod camera;
 mod chunk;
@@ -23,6 +24,7 @@ mod pathfind;
 mod save;
 mod screenshot;
 mod sound;
+mod texture;
 mod world;
 mod worldgen;
 
@@ -151,6 +153,13 @@ struct App {
     input: MoveInput,
     mobs: MobManager,
     sound: SoundField,
+    /// What the player actually hears. `sound` above is the mob-AI
+    /// propagation model and makes no noise of its own.
+    audio: audio::Audio,
+    /// Ground contact last frame, so a landing can be detected.
+    was_on_ground: bool,
+    /// Distance walked since the last footstep.
+    step_accum: f32,
 
     /// Seed, player record, inventory and the durable edit log. This IS the save.
     data: save::SaveData,
@@ -178,6 +187,8 @@ struct App {
     chip_timer: f32,
     place_timer: f32,
     attack_timer: f32,
+    /// The block the current swing is committed to eating.
+    mining_target: Option<(i32, i32, i32)>,
     /// Set by `--shot <path>`: capture one frame once the world is loaded, then quit.
     shot_path: Option<std::path::PathBuf>,
     /// `--demo`: carve a crater and spawn one of each mob before capturing, so
@@ -186,7 +197,12 @@ struct App {
     /// `--ui table` / `--ui furnace`: open that panel before capturing.
     ui_demo: Option<String>,
     /// `--gauntlet`: a robot plays the game and reports what broke.
-    gauntlet: Option<gauntlet::Gauntlet>,
+    gauntlet: Option<gauntlet::Harness>,
+    /// Block ids mined and placed this frame, for coverage tracking.
+    mined_kinds: Vec<u8>,
+    placed_kinds: Vec<u8>,
+    stat_crafted: u64,
+    save_roundtrip: Option<bool>,
     /// Multiplier on the day/night clock, driven by the gauntlet.
     time_scale: f32,
     // Monotonic counters the gauntlet watches to tell whether anything happened.
@@ -205,6 +221,7 @@ struct App {
     loading: bool,
     gauntlet_done: bool,
     gauntlet_stocked: bool,
+    gauntlet_findings: usize,
     load_frames: u32,
     start: Instant,
 }
@@ -252,6 +269,9 @@ impl App {
             input: MoveInput::default(),
             mobs: MobManager::new(data.seed as u64 ^ 0x9E37_79B9),
             sound: SoundField::new(),
+            audio: audio::Audio::new(),
+            was_on_ground: false,
+            step_accum: 0.0,
             data,
             save_path,
             time_since_save: 0.0,
@@ -268,6 +288,7 @@ impl App {
             chip_timer: 0.0,
             place_timer: 0.0,
             attack_timer: 0.0,
+            mining_target: None,
             shot_path: std::env::args()
                 .skip_while(|a| a != "--shot")
                 .nth(1)
@@ -276,9 +297,29 @@ impl App {
             ui_demo: std::env::args()
                 .skip_while(|a| a != "--ui")
                 .nth(1),
-            gauntlet: std::env::args()
-                .any(|a| a == "--gauntlet")
-                .then(gauntlet::Gauntlet::new),
+            gauntlet: std::env::args().any(|a| a == "--gauntlet").then(|| {
+                let arg = |name: &str| {
+                    std::env::args()
+                        .skip_while(|a| a != name)
+                        .nth(1)
+                        .and_then(|v| v.parse::<f64>().ok())
+                };
+                // An unseeded run picks its own seed and prints it, so a
+                // failure found by chance can still be replayed exactly.
+                let seed = arg("--seed").map(|v| v as u64).unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0x5EED)
+                });
+                let secs = arg("--secs").map(|v| v as f32).unwrap_or(gauntlet::DEFAULT_SECONDS);
+                println!("[gauntlet] seed {seed}, {secs:.0}s session");
+                gauntlet::Harness::new(seed, secs)
+            }),
+            mined_kinds: Vec::new(),
+            placed_kinds: Vec::new(),
+            stat_crafted: 0,
+            save_roundtrip: None,
             time_scale: 1.0,
             stat_carved: 0,
             stat_broken: 0,
@@ -293,6 +334,7 @@ impl App {
             loading: true,
             gauntlet_done: false,
             gauntlet_stocked: false,
+            gauntlet_findings: 0,
             load_frames: 0,
             start: Instant::now(),
         }
@@ -338,6 +380,7 @@ impl App {
         self.place_timer -= dt;
         self.attack_timer -= dt;
 
+        let eye = self.camera.pos;
         let hit = self
             .world
             .raycast(self.camera.pos, self.camera.forward(), REACH);
@@ -361,7 +404,11 @@ impl App {
                         .unwrap_or(1.0);
                     let knock = (mob_pos - self.camera.pos).normalize_or_zero() * KNOCKBACK
                         + Vec3::Y * KNOCKBACK_LIFT;
-                    self.mobs.damage(id, damage, knock);
+                    let killed = self.mobs.damage(id, damage, knock);
+                    self.audio.play(
+                        if killed { audio::Sound::MobDeath } else { audio::Sound::MobHurt },
+                        audio::PlayOpts::at(mob_pos, eye),
+                    );
                     self.data.inventory.damage_selected(1);
                     // Swinging is loud: a fight is not a quiet way to spend time.
                     self.sound.emit(sound::NoiseEvent {
@@ -388,22 +435,58 @@ impl App {
                         self.chip_timer = SMASH_CHARGE;
                         if let Some(broken) = self.world.smash_block(bx, by, bz) {
                             self.stat_broken += 1;
+                            self.mined_kinds.push(broken.0);
+                            // A smash is the loud option, and it should sound it.
+                            self.audio.play(
+                                audio::Sound::Break(broken),
+                                audio::PlayOpts::at(hit.point, eye).with_volume(1.3),
+                            );
                             self.data.edits.note_set_block(bx, by, bz, BlockId::AIR);
                             self.grant_drop(tool, broken);
                         }
                     }
                 } else if self.chip_timer <= 0.0 {
+                    // Sticky targeting: keep eating the block the swing started
+                    // on. Without it, the moment the ray drills through, mining
+                    // silently jumps to the block behind and leaves a ring of
+                    // the first one standing.
+                    let aimed = (bx, by, bz);
+                    if self.mining_target != Some(aimed)
+                        && self
+                            .mining_target
+                            .map(|t| self.world.block_at(t.0, t.1, t.2).is_air())
+                            .unwrap_or(true)
+                    {
+                        self.mining_target = Some(aimed);
+                    }
                     // Quiet and slow: carve a small sphere of sub-voxels. Hard
                     // blocks take proportionally longer per bite.
                     let speed = item::mining_speed_multiplier(tool, target);
                     self.chip_timer = CHIP_INTERVAL * target.hardness() / speed.max(0.01);
 
-                    let before = self.world.block_at(bx, by, bz);
-                    self.stat_carved += self.world.chip_sphere(&hit, CHIP_RADIUS) as u64;
+                    let t = self.mining_target.unwrap_or(aimed);
+                    let before = self.world.block_at(t.0, t.1, t.2);
+                    let removed = self.world.chip_block(t, hit.point, CHIP_RADIUS);
+                    self.stat_carved += removed as u64;
+                    if removed > 0 {
+                        // The dig tick has its own cooldown inside the mixer, so
+                        // firing it every chip becomes a steady scrape rather
+                        // than a machine-gun buzz.
+                        self.audio.play(
+                            audio::Sound::Dig(before),
+                            audio::PlayOpts::at(hit.point, eye),
+                        );
+                    }
                     // Record what was carved so it survives streaming and saving.
-                    self.note_carves(&hit);
-                    if self.world.block_at(bx, by, bz).is_air() && !before.is_air() {
+                    self.note_carves(t);
+                    if self.world.block_at(t.0, t.1, t.2).is_air() && !before.is_air() {
                         self.grant_drop(tool, before);
+                        self.mined_kinds.push(before.0);
+                        self.mining_target = None;
+                        self.audio.play(
+                            audio::Sound::Break(before),
+                            audio::PlayOpts::at(hit.point, eye),
+                        );
                     }
                 }
             }
@@ -434,6 +517,14 @@ impl App {
             let (min, max) = self.player.aabb();
             if self.world.place_block(px, py, pz, id, min, max) {
                 self.stat_placed += 1;
+                self.placed_kinds.push(id.0);
+                self.audio.play(
+                    audio::Sound::Place(id),
+                    audio::PlayOpts::at(
+                        Vec3::new(px as f32 + 0.5, py as f32 + 0.5, pz as f32 + 0.5),
+                        eye,
+                    ),
+                );
                 self.data.edits.note_set_block(px, py, pz, id);
                 let sel = self.data.inventory.selected();
                 self.data.inventory.take_from_slot(sel, 1);
@@ -507,8 +598,8 @@ impl App {
         println!("[loudstone] demo: crater carved, 4 mobs spawned");
     }
 
-    /// Sample the game for the gauntlet, hand it the frame, and apply whatever
-    /// it decides to do. Returns a screenshot name when a step asks for one.
+    /// Sample the game, hand the harness a probe, and carry out what it decides.
+    /// Returns a screenshot name when the session asks for one.
     fn drive_gauntlet(&mut self, dt: f32) -> Option<&'static str> {
         if self.gauntlet.is_none() {
             return None;
@@ -519,12 +610,15 @@ impl App {
             return None;
         }
         if !self.gauntlet_stocked {
-            // A robot with empty pockets cannot test placing, and an empty hand
-            // mines at the slowest possible rate.
+            // A robot with empty pockets cannot test placing or crafting, and
+            // bare hands mine at the slowest possible rate.
             self.gauntlet_stocked = true;
             self.data.inventory.add_item(ItemId::COBBLESTONE, 64);
+            self.data.inventory.add_item(ItemId::PLANKS, 32);
+            self.data.inventory.add_item(ItemId::STICK, 16);
             self.data.inventory.add_item(ItemId::TORCH, 16);
             self.data.inventory.add_item(ItemId::STONE_PICKAXE, 1);
+            self.data.inventory.add_item(ItemId::IRON_AXE, 1);
         }
 
         let (min, max) = self.player.aabb();
@@ -535,37 +629,65 @@ impl App {
             .filter(|m| m.kind.is_hostile())
             .map(|m| (m.pos - self.player.pos).length())
             .fold(f32::INFINITY, f32::min);
+        let mob_pos_bad = self.mobs.mobs().iter().any(|m| !m.pos.is_finite());
 
+        // Inventory health: totals for the conservation oracle, plus a scan for
+        // stacks that are over their limit or sitting at zero.
+        let mut inventory_total = 0u32;
+        let mut inventory_bad = false;
+        for slot in self.data.inventory.slots().iter().flatten() {
+            inventory_total += slot.count as u32;
+            if slot.count == 0 || slot.count as u32 > 64 {
+                inventory_bad = true;
+            }
+        }
+
+        let eye = self.player.eye();
         let probe = gauntlet::Probe {
             pos: self.player.pos,
+            vel: self.player.vel,
             on_ground: self.player.on_ground,
             health: self.data.player.health,
             fps: self.fps,
             chunks: self.world.chunks.len(),
             mobs: self.mobs.mobs().len(),
+            mob_pos_bad,
             inside_solid: self.world.box_collides(min, max),
             daylight: daylight_at(self.time_of_day),
             nearest_hostile: nearest_hostile.is_finite().then_some(nearest_hostile),
+            biome: self
+                .world
+                .terrain
+                .biome_at(self.player.pos.x as i32, self.player.pos.z as i32)
+                as u8,
+            light_here: self
+                .world
+                .light_at(eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32),
+            inventory_total,
+            inventory_bad,
+            world_idle: self.world.is_idle(),
+            panel: match self.ui {
+                Ui::Playing => 0,
+                Ui::Inventory => 1,
+                Ui::Table => 2,
+                Ui::Furnace(_) => 3,
+            },
             carved: self.stat_carved,
             broken: self.stat_broken,
             placed: self.stat_placed,
+            crafted: self.stat_crafted,
+            mined_kinds: std::mem::take(&mut self.mined_kinds),
+            placed_kinds: std::mem::take(&mut self.placed_kinds),
+            save_roundtrip: self.save_roundtrip.take(),
         };
 
-        let g = self.gauntlet.as_mut().unwrap();
-        let frame = g.tick(dt, &probe);
+        let frame = self.gauntlet.as_mut().unwrap().tick(dt, &probe);
 
         let Some(frame) = frame else {
-            // Finished, or aborted. Report and quit.
-            let g = self.gauntlet.take().unwrap();
-            println!("\n[gauntlet] ---- report ----");
-            if g.findings.is_empty() {
-                println!("[gauntlet] {} steps, no findings", g.total_steps());
-            } else {
-                println!("[gauntlet] {} findings:", g.findings.len());
-                for f in &g.findings {
-                    println!("[gauntlet]   {}: {}", f.step, f.what);
-                }
-            }
+            let mut g = self.gauntlet.take().unwrap();
+            g.finish();
+            g.report();
+            self.gauntlet_findings = g.findings.len();
             self.gauntlet_done = true;
             return None;
         };
@@ -574,24 +696,114 @@ impl App {
         self.mining = frame.mine;
         self.smash_mode = frame.smash;
         self.placing = frame.place;
-        self.time_scale = frame.time_scale;
         self.camera.yaw += frame.yaw_rate * dt;
         if let Some(pitch) = frame.look_pitch {
-            self.camera.pitch = pitch;
+            self.camera.pitch = pitch.clamp(-1.5, 1.5);
         }
         if let Some(frac) = frame.set_time_frac {
             self.time_of_day = frac * DAY_LENGTH;
         }
+        if let Some(slot) = frame.hotbar {
+            self.data.inventory.set_selected(slot);
+        }
+        match frame.set_inventory {
+            Some(true) if self.ui == Ui::Playing => self.ui = Ui::Inventory,
+            Some(false) if self.ui.is_panel() => self.close_panel(),
+            _ => {}
+        }
+        if frame.attack {
+            // Swing at whatever is in front, through the same path a click takes.
+            self.mining = true;
+        }
+        if frame.craft {
+            // Fill the 2x2 with planks and take whatever it resolves to. This
+            // exercises resolve/consume/add_item together rather than in a test.
+            self.craft_grid = [None; 9];
+            for c in self.craft_grid.iter_mut().take(4) {
+                *c = Some(ItemStack::new(ItemId::PLANKS, 1));
+            }
+            if let Some(out) = crafting::craft(&mut self.craft_grid[..4]) {
+                self.data.inventory.add_item(out.item, out.count as u32);
+                self.stat_crafted += 1;
+            }
+            self.craft_grid = [None; 9];
+        }
+        if let Some((x, z)) = frame.teleport {
+            let y = self.world.surface_y(x, z) as f32 + 2.0;
+            self.player.pos = Vec3::new(x as f32 + 0.5, y, z as f32 + 0.5);
+            self.player.vel = Vec3::ZERO;
+            self.camera.pos = self.player.eye();
 
+        // Footsteps are driven by distance covered, not by a timer, so walking
+        // and sprinting sound different without any extra bookkeeping.
+        let ground_block = {
+            let f = self.player.pos;
+            self.world
+                .block_at(f.x.floor() as i32, (f.y - 0.2).floor() as i32, f.z.floor() as i32)
+        };
+        if self.player.on_ground {
+            let moved = Vec3::new(self.player.vel.x, 0.0, self.player.vel.z).length() * dt;
+            self.step_accum += moved;
+            if self.step_accum > 2.2 && !ground_block.is_air() {
+                self.step_accum = 0.0;
+                self.audio.play(
+                    audio::Sound::Footstep(ground_block),
+                    audio::PlayOpts::at(self.player.pos, self.camera.pos),
+                );
+            }
+            if !self.was_on_ground && !ground_block.is_air() {
+                // Landing: one firmer step.
+                self.audio.play(
+                    audio::Sound::Footstep(ground_block),
+                    audio::PlayOpts::at(self.player.pos, self.camera.pos).with_volume(1.5),
+                );
+            }
+        }
+        self.was_on_ground = self.player.on_ground;
+            self.player.unstick(&self.world);
+        }
+        if frame.save_check {
+            self.save_roundtrip = Some(self.check_save_roundtrip());
+        }
         for i in 0..frame.spawn_hostiles {
             let a = i as f32 * std::f32::consts::TAU / frame.spawn_hostiles.max(1) as f32;
-            let d = 9.0;
-            let p = self.player.pos + Vec3::new(a.cos() * d, 0.0, a.sin() * d);
+            let p = self.player.pos + Vec3::new(a.cos() * 9.0, 0.0, a.sin() * 9.0);
             let y = self.world.surface_y(p.x as i32, p.z as i32) as f32 + 1.0;
             let kind = MobKind::HOSTILES[i % MobKind::HOSTILES.len()];
             self.mobs.spawn(kind, Vec3::new(p.x, y, p.z));
         }
         frame.shot
+    }
+
+    /// Write the save, read it back, and check it describes the same world.
+    /// This is the one oracle that cannot be judged from inside the running
+    /// game -- a save that silently loses edits looks perfect until you reload.
+    fn check_save_roundtrip(&mut self) -> bool {
+        self.data.player.pos = self.player.pos;
+        let path = std::env::temp_dir().join("loudstone_gauntlet_roundtrip.lsw");
+        if save::save_to_file(&path, &self.data).is_err() {
+            return false;
+        }
+        match save::load_from_file(&path) {
+            Ok(back) => {
+                let mut same = back.seed == self.data.seed
+                    && back.player.pos == self.data.player.pos
+                    && back.edits.modified_chunk_count()
+                        == self.data.edits.modified_chunk_count()
+                    && back.inventory.slots() == self.data.inventory.slots();
+                // Every recorded block edit must come back identical. Counting
+                // chunks alone would not notice a delta that loaded empty.
+                for (key, _) in self.data.edits.chunks() {
+                    if back.edits.chunk(*key).is_none() {
+                        same = false;
+                        break;
+                    }
+                }
+                let _ = std::fs::remove_file(&path);
+                same
+            }
+            Err(_) => false,
+        }
     }
 
     /// Stock the inventory and open a panel, so the crafting and furnace screens
@@ -655,31 +867,13 @@ impl App {
 
     /// Mirror the sub-voxels `chip_sphere` just cleared into the durable edit
     /// log. The world is the authority; this reads back what it decided.
-    fn note_carves(&mut self, hit: &world::RayHit) {
-        let (bx, by, bz) = hit.block;
-        let r = CHIP_RADIUS.ceil() as i32;
-        let (cx, cy, cz) = (
-            hit.sub.0 as i32,
-            hit.sub.1 as i32,
-            hit.sub.2 as i32,
-        );
-        for dz in -r..=r {
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    let (sx, sy, sz) = (cx + dx, cy + dy, cz + dz);
-                    if !(0..SUBVOX_I).contains(&sx)
-                        || !(0..SUBVOX_I).contains(&sy)
-                        || !(0..SUBVOX_I).contains(&sz)
-                    {
-                        continue;
-                    }
-                    if !self
-                        .world
-                        .sub_solid(bx, by, bz, sx as usize, sy as usize, sz as usize)
-                    {
-                        self.data.edits.note_carve(
-                            bx, by, bz, sx as usize, sy as usize, sz as usize,
-                        );
+    fn note_carves(&mut self, block: (i32, i32, i32)) {
+        let (bx, by, bz) = block;
+        for sy in 0..SUBVOX {
+            for sz in 0..SUBVOX {
+                for sx in 0..SUBVOX {
+                    if !self.world.sub_solid(bx, by, bz, sx, sy, sz) {
+                        self.data.edits.note_carve(bx, by, bz, sx, sy, sz);
                     }
                 }
             }
@@ -786,22 +980,42 @@ impl App {
             .mobs
             .update(&mut self.world, &mut self.sound, &pstate, daylight, dt);
 
+        let eye_now = self.camera.pos;
         for ev in events {
             match ev {
                 MobEvent::PlayerDamaged { amount, .. } => {
                     self.data.player.health -= amount;
+                    self.audio.play(audio::Sound::PlayerHurt, audio::PlayOpts::ui());
                 }
                 // Mob drops (meat, bone, gunpowder) have no item counterpart:
                 // hunger and brewing are deliberately out of scope, so there is
                 // nothing for them to become. The events are left in place so a
                 // later build can give them one.
-                MobEvent::Drop { .. }
-                | MobEvent::Exploded { .. }
-                | MobEvent::MobDied { .. } => {}
+                MobEvent::Exploded { pos, .. } => {
+                    self.audio
+                        .play(audio::Sound::Explosion, audio::PlayOpts::at(pos, eye_now));
+                }
+                MobEvent::MobDied { pos, .. } => {
+                    self.audio
+                        .play(audio::Sound::MobDeath, audio::PlayOpts::at(pos, eye_now));
+                }
+                // Mob drops have no item counterpart: hunger and brewing are
+                // deliberately out of scope, so there is nothing to become.
+                MobEvent::Drop { .. } => {}
+            }
+        }
+
+        for m in self.mobs.mobs() {
+            if m.fuse_fraction() > 0.0 {
+                self.audio.play(
+                    audio::Sound::CreeperFuse,
+                    audio::PlayOpts::at(m.pos, eye_now),
+                );
             }
         }
 
         if self.data.player.health <= 0.0 {
+            self.audio.play(audio::Sound::PlayerHurt, audio::PlayOpts::ui().with_pitch(0.6));
             self.respawn();
         }
 
@@ -831,7 +1045,17 @@ impl App {
             let half = size.x * 0.5;
             let min = Vec3::new(m.pos.x - half, m.pos.y, m.pos.z - half);
             let max = Vec3::new(m.pos.x + half, m.pos.y + size.y, m.pos.z + half);
-            gfx::Renderer::box_geometry(&mut verts, &mut indices, min, max, m.kind.color());
+            let kind_index = MobKind::ALL.iter().position(|k| *k == m.kind).unwrap_or(3);
+            let (face_tile, head_tile, body_tile) = texture::mob_tiles(kind_index);
+            gfx::Renderer::box_geometry(
+                &mut verts,
+                &mut indices,
+                min,
+                max,
+                [1.0, 1.0, 1.0],
+                body_tile,
+            );
+            let _ = face_tile;
 
             // A darker head cube marks facing without needing a model.
             let hs = size.x * 0.34;
@@ -843,8 +1067,10 @@ impl App {
                 &mut indices,
                 hc - Vec3::splat(hs),
                 hc + Vec3::splat(hs),
-                [c[0] * 0.55, c[1] * 0.55, c[2] * 0.55],
+                [1.0, 1.0, 1.0],
+                head_tile,
             );
+            let _ = c;
         }
         for p in self.mobs.projectiles() {
             gfx::Renderer::box_geometry(
@@ -853,6 +1079,7 @@ impl App {
                 p.pos - Vec3::splat(0.06),
                 p.pos + Vec3::splat(0.06),
                 [0.85, 0.85, 0.88],
+                texture::T_WHITE,
             );
         }
 
@@ -1253,7 +1480,12 @@ impl ApplicationHandler for App {
                     return;
                 }
                 match button {
-                    MouseButton::Left => self.mining = pressed,
+                    MouseButton::Left => {
+                        self.mining = pressed;
+                        if !pressed {
+                            self.mining_target = None;
+                        }
+                    }
                     MouseButton::Right => self.placing = pressed,
                     _ => {}
                 }
