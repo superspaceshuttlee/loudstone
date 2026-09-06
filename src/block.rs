@@ -24,19 +24,8 @@
 //! `registry_ids_match_the_constants` fails the build if the data ever
 //! disagrees with them.
 
-// `main.rs` owns the crate's module list and is not this agent's file to edit,
-// so the procedural texture module is attached here with an explicit path. It is
-// pure data -- no wgpu, no file loading -- which is why it hangs off the block
-// table rather than off the renderer. The integrator can promote it to a plain
-// `mod texture;` in `main.rs` and delete these two lines; nothing else changes
-// except the `crate::block::texture` paths.
-#[path = "texture.rs"]
-pub mod texture;
-
-// The content registry is attached the same way and for the same reason: it is
-// pure data with no renderer in it, and `main.rs` is not this agent's file to
-// edit. The integrator can promote it to a plain `mod registry;` in `main.rs`
-// and delete these two lines; only the `crate::block::registry` paths change.
+// The registry lives under `block` because block, item, and crafting rules all
+// share it. The renderer owns the separate top-level `texture` module.
 #[path = "registry.rs"]
 pub mod registry;
 
@@ -217,9 +206,7 @@ impl BlockId {
     /// data file defines.
     #[allow(dead_code)]
     pub fn name(self) -> &'static str {
-        registry::get()
-            .block(self)
-            .map_or("?", |d| d.name.as_str())
+        registry::get().block(self).map_or("?", |d| d.name.as_str())
     }
 
     /// Look a block up by the name it carries in `blocks.ron`. This is how

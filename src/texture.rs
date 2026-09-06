@@ -627,8 +627,7 @@ fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
 
 #[inline]
 fn hash(x: i32, y: i32, seed: u32) -> u32 {
-    let mut h = (x as u32)
-        .wrapping_mul(0x27D4_EB2D)
+    let mut h = (x as u32).wrapping_mul(0x27D4_EB2D)
         ^ (y as u32).wrapping_mul(0x1656_67B1)
         ^ seed.wrapping_mul(0x85EB_CA6B);
     h ^= h >> 15;
@@ -809,18 +808,48 @@ fn paint_tile(id: TileId, t: &mut Tex) {
         T_CLAY => clay(t),
         T_SNOW => snow(t),
         T_ICE => ice(t),
-        T_GRANITE => speckled_stone(t, rgb(155, 111, 96), rgb(196, 152, 133), rgb(112, 76, 66), 0x6101),
-        T_DIORITE => speckled_stone(t, rgb(196, 196, 192), rgb(232, 232, 228), rgb(146, 146, 144), 0x6102),
-        T_ANDESITE => speckled_stone(t, rgb(140, 145, 140), rgb(172, 177, 172), rgb(108, 113, 108), 0x6103),
+        T_GRANITE => speckled_stone(
+            t,
+            rgb(155, 111, 96),
+            rgb(196, 152, 133),
+            rgb(112, 76, 66),
+            0x6101,
+        ),
+        T_DIORITE => speckled_stone(
+            t,
+            rgb(196, 196, 192),
+            rgb(232, 232, 228),
+            rgb(146, 146, 144),
+            0x6102,
+        ),
+        T_ANDESITE => speckled_stone(
+            t,
+            rgb(140, 145, 140),
+            rgb(172, 177, 172),
+            rgb(108, 113, 108),
+            0x6103,
+        ),
         T_COBBLESTONE => cobbles(t, rgb(126, 126, 132), 0x6201, 7, 1.15, 0.44),
         T_BEDROCK => bedrock(t),
         T_PLANKS => planks(t, PLANK_BASE, 0x6301),
         T_OAK_LOG_SIDE => bark(t, WOOD_BASE, 0x6401),
         T_OAK_LOG_TOP => log_end(t, rgb(176, 143, 92), rgb(140, 110, 68), WOOD_BASE, 0x6402),
         T_BIRCH_LOG_SIDE => birch_bark(t),
-        T_BIRCH_LOG_TOP => log_end(t, rgb(216, 205, 178), rgb(186, 172, 143), rgb(206, 200, 184), 0x6404),
+        T_BIRCH_LOG_TOP => log_end(
+            t,
+            rgb(216, 205, 178),
+            rgb(186, 172, 143),
+            rgb(206, 200, 184),
+            0x6404,
+        ),
         T_SPRUCE_LOG_SIDE => bark(t, rgb(70, 49, 30), 0x6405),
-        T_SPRUCE_LOG_TOP => log_end(t, rgb(140, 106, 62), rgb(106, 78, 44), rgb(70, 49, 30), 0x6406),
+        T_SPRUCE_LOG_TOP => log_end(
+            t,
+            rgb(140, 106, 62),
+            rgb(106, 78, 44),
+            rgb(70, 49, 30),
+            0x6406,
+        ),
         T_OAK_LEAVES => leaves(t, rgb(64, 124, 48), rgb(44, 94, 34), 0x6501, 0.38),
         T_BIRCH_LEAVES => leaves(t, rgb(122, 160, 72), rgb(92, 128, 52), 0x6502, 0.40),
         T_SPRUCE_LEAVES => needles(t, rgb(44, 84, 56), rgb(28, 60, 40), 0x6503),
@@ -1063,7 +1092,11 @@ fn speckled_stone(t: &mut Tex, base: Rgba, light: Rgba, dark: Rgba, seed: u32) {
     for i in 0..22 {
         let x = (rand01(i, 31, seed) * TILE as f32) as usize % TILE;
         let y = (rand01(i, 32, seed) * TILE as f32) as usize % TILE;
-        let c = if rand01(i, 33, seed) > 0.5 { light } else { dark };
+        let c = if rand01(i, 33, seed) > 0.5 {
+            light
+        } else {
+            dark
+        };
         t.set(x, y, c);
         if rand01(i, 34, seed) > 0.55 {
             t.set((x + 1) % TILE, y, mix(c, base, 0.4));
@@ -1179,7 +1212,11 @@ fn log_end(t: &mut Tex, pale: Rgba, dark: Rgba, rim: Rgba, seed: u32) {
             let dy = y as f32 + 0.5 - c;
             let d = (dx * dx + dy * dy).sqrt() + (vnoise(x as f32, y as f32, 4, seed) - 0.5) * 1.1;
             if d > 6.6 {
-                t.set(x, y, shade(rim, 0.9 + 0.2 * vnoise(x as f32, y as f32, 8, seed)));
+                t.set(
+                    x,
+                    y,
+                    shade(rim, 0.9 + 0.2 * vnoise(x as f32, y as f32, 8, seed)),
+                );
             } else {
                 let ring = ((d * 1.35).floor() as i32) % 2 == 0;
                 t.set(x, y, if ring { pale } else { dark });
@@ -1217,11 +1254,13 @@ fn leaves(t: &mut Tex, light: Rgba, dark: Rgba, seed: u32, hole: f32) {
             if snapshot[y * TILE + x][3] == 0 {
                 continue;
             }
-            let n = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| {
-                let nx = (x as i32 + dx).rem_euclid(TILE as i32) as usize;
-                let ny = (y as i32 + dy).rem_euclid(TILE as i32) as usize;
-                snapshot[ny * TILE + nx][3] == 0
-            });
+            let n = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)]
+                .iter()
+                .any(|(dx, dy)| {
+                    let nx = (x as i32 + dx).rem_euclid(TILE as i32) as usize;
+                    let ny = (y as i32 + dy).rem_euclid(TILE as i32) as usize;
+                    snapshot[ny * TILE + nx][3] == 0
+                });
             if n {
                 t.darken(x, y, 0.78);
             }
@@ -1373,7 +1412,11 @@ fn water(t: &mut Tex) {
         let x = (rand01(i, 94, 0x7301) * TILE as f32) as usize % TILE;
         let y = (rand01(i, 95, 0x7301) * TILE as f32) as usize % TILE;
         let c = t.get(x, y);
-        t.set(x, y, [shade(c, 1.3)[0], shade(c, 1.3)[1], shade(c, 1.3)[2], c[3]]);
+        t.set(
+            x,
+            y,
+            [shade(c, 1.3)[0], shade(c, 1.3)[1], shade(c, 1.3)[2], c[3]],
+        );
     }
 }
 
@@ -1630,10 +1673,7 @@ fn stick(t: &mut Tex) {
         "................",
         "................",
     ];
-    t.art(
-        &art,
-        &[('s', rgb(150, 110, 62)), ('S', rgb(108, 78, 42))],
-    );
+    t.art(&art, &[('s', rgb(150, 110, 62)), ('S', rgb(108, 78, 42))]);
 }
 
 fn nugget(t: &mut Tex, base: Rgba, hi: Rgba, lo: Rgba) {
@@ -1691,21 +1731,9 @@ fn ingot(t: &mut Tex) {
 /// Palette for one tool tier: `(head, head highlight, head shadow)`.
 type TierPal = (Rgba, Rgba, Rgba);
 
-const TIER_WOOD: TierPal = (
-    rgb(163, 124, 74),
-    rgb(198, 158, 104),
-    rgb(112, 82, 46),
-);
-const TIER_STONE: TierPal = (
-    rgb(136, 136, 142),
-    rgb(178, 178, 184),
-    rgb(90, 90, 96),
-);
-const TIER_IRON: TierPal = (
-    rgb(214, 214, 220),
-    rgb(244, 244, 248),
-    rgb(148, 148, 156),
-);
+const TIER_WOOD: TierPal = (rgb(163, 124, 74), rgb(198, 158, 104), rgb(112, 82, 46));
+const TIER_STONE: TierPal = (rgb(136, 136, 142), rgb(178, 178, 184), rgb(90, 90, 96));
+const TIER_IRON: TierPal = (rgb(214, 214, 220), rgb(244, 244, 248), rgb(148, 148, 156));
 
 const PICKAXE_ART: [&str; TILE] = [
     "................",
@@ -2138,10 +2166,22 @@ mod tests {
         for t in 0..TILE_COUNT {
             let [u0, v0, u1, v1] = tile_uv_rect(t as TileId);
             let (ox, oy) = tile_origin(t as TileId);
-            let (lo_u, hi_u) = (ox as f32 / ATLAS_W as f32, (ox + TILE) as f32 / ATLAS_W as f32);
-            let (lo_v, hi_v) = (oy as f32 / ATLAS_H as f32, (oy + TILE) as f32 / ATLAS_H as f32);
-            assert!(u0 >= lo_u && u1 <= hi_u, "tile {t} u range escapes its cell");
-            assert!(v0 >= lo_v && v1 <= hi_v, "tile {t} v range escapes its cell");
+            let (lo_u, hi_u) = (
+                ox as f32 / ATLAS_W as f32,
+                (ox + TILE) as f32 / ATLAS_W as f32,
+            );
+            let (lo_v, hi_v) = (
+                oy as f32 / ATLAS_H as f32,
+                (oy + TILE) as f32 / ATLAS_H as f32,
+            );
+            assert!(
+                u0 >= lo_u && u1 <= hi_u,
+                "tile {t} u range escapes its cell"
+            );
+            assert!(
+                v0 >= lo_v && v1 <= hi_v,
+                "tile {t} v range escapes its cell"
+            );
             assert!(u0 < u1 && v0 < v1);
         }
     }
@@ -2220,7 +2260,11 @@ mod tests {
                 let mut c = a.texel(sx, sy);
                 // Checkerboard behind transparent texels so cut-outs are visible.
                 if c[3] < 255 {
-                    let bg = if ((x / 8) + (y / 8)) % 2 == 0 { 90u8 } else { 130 };
+                    let bg = if ((x / 8) + (y / 8)) % 2 == 0 {
+                        90u8
+                    } else {
+                        130
+                    };
                     let t = c[3] as f32 / 255.0;
                     for k in 0..3 {
                         c[k] = (c[k] as f32 * t + bg as f32 * (1.0 - t)) as u8;

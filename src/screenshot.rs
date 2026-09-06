@@ -114,7 +114,10 @@ mod tests {
         let pixels = vec![0x40u8; 4 * 4 * 4];
         write_rgba_png(&path, 4, 4, &pixels).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+        );
         // IHDR immediately follows the signature, IEND terminates the file.
         assert_eq!(&bytes[12..16], b"IHDR");
         assert_eq!(&bytes[bytes.len() - 8..bytes.len() - 4], b"IEND");

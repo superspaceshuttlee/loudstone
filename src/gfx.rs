@@ -3,8 +3,8 @@
 use crate::camera::{Camera, CameraUniform};
 use crate::chunk::ChunkPos;
 use crate::config::{
-    render_distance_blocks, CHUNK_SIZE_I, FOG_END_FRAC, FOG_START_FRAC, HIGHLIGHT_COLOR,
-    HIGHLIGHT_INFLATE,
+    CHUNK_SIZE_I, FOG_END_FRAC, FOG_START_FRAC, HIGHLIGHT_COLOR, HIGHLIGHT_INFLATE,
+    render_distance_blocks,
 };
 use crate::hud::Hud;
 use crate::mesh::Vertex;
@@ -15,7 +15,6 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-
 
 /// A GPU buffer that is written every frame and only reallocated when it needs
 /// to grow.
@@ -451,8 +450,10 @@ impl Renderer {
             return;
         }
         let (device, queue) = (&self.device, &self.queue);
-        self.entity_v.write(device, queue, bytemuck::cast_slice(verts));
-        self.entity_i.write(device, queue, bytemuck::cast_slice(indices));
+        self.entity_v
+            .write(device, queue, bytemuck::cast_slice(verts));
+        self.entity_i
+            .write(device, queue, bytemuck::cast_slice(indices));
     }
 
     /// Build an axis-aligned coloured box. Mobs are drawn as a body and a head,
@@ -475,6 +476,25 @@ impl Renderer {
         );
     }
 
+    /// Build a textured model cuboid around a named-part style pivot. Local +X
+    /// is forward, +Y is up, and +Z is the model's left side. `bend` rotates
+    /// the part in its forward/up plane before the whole model follows `yaw`.
+    pub fn model_box_geometry(
+        verts: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        pivot: glam::Vec3,
+        local_min: glam::Vec3,
+        local_max: glam::Vec3,
+        yaw: f32,
+        bend: f32,
+        color: [f32; 3],
+        tiles: [crate::texture::TileId; 6],
+    ) {
+        push_model_box_shaded(
+            verts, indices, pivot, local_min, local_max, yaw, bend, color, tiles,
+        );
+    }
+
     /// Point the selection box at a block, or clear it with `None`. Rebuilds
     /// only when the target actually changes, so holding still costs nothing.
     pub fn set_highlight(&mut self, block: Option<(i32, i32, i32)>) {
@@ -489,8 +509,10 @@ impl Renderer {
         let (verts, indices) = wire_box(x as f32, y as f32, z as f32);
         self.highlight_count = indices.len() as u32;
         let (device, queue) = (&self.device, &self.queue);
-        self.highlight_v.write(device, queue, bytemuck::cast_slice(&verts));
-        self.highlight_i.write(device, queue, bytemuck::cast_slice(&indices));
+        self.highlight_v
+            .write(device, queue, bytemuck::cast_slice(&verts));
+        self.highlight_i
+            .write(device, queue, bytemuck::cast_slice(&indices));
     }
 
     /// Draw one frame. Surface loss and resize races are handled here rather than
@@ -655,20 +677,17 @@ impl Renderer {
 impl Renderer {
     /// Map the readback buffer and write it out. Blocks on the GPU, which is
     /// fine: taking a screenshot is explicitly not on the hot path.
-    fn write_capture(
-        &self,
-        path: &std::path::Path,
-        buf: &wgpu::Buffer,
-        row: u32,
-        w: u32,
-        h: u32,
-    ) {
+    fn write_capture(&self, path: &std::path::Path, buf: &wgpu::Buffer, row: u32, w: u32, h: u32) {
         let slice = buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        if self.device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        if self
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .is_err()
+        {
             eprintln!("[loudstone] screenshot: device poll failed");
             return;
         }
@@ -858,6 +877,68 @@ fn push_box_shaded(
                 uv: [
                     rect[0] + (rect[2] - rect[0]) * c[0],
                     rect[1] + (rect[3] - rect[1]) * c[1],
+                ],
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+fn push_model_box_shaded(
+    verts: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    pivot: glam::Vec3,
+    local_min: glam::Vec3,
+    local_max: glam::Vec3,
+    yaw: f32,
+    bend: f32,
+    color: [f32; 3],
+    tiles: [crate::texture::TileId; 6],
+) {
+    let (sy, cy) = yaw.sin_cos();
+    let (sb, cb) = bend.sin_cos();
+    let transform = |xh: bool, yh: bool, zh: bool| {
+        let p = glam::Vec3::new(
+            if xh { local_max.x } else { local_min.x },
+            if yh { local_max.y } else { local_min.y },
+            if zh { local_max.z } else { local_min.z },
+        );
+        let bent = glam::Vec3::new(p.x * cb - p.y * sb, p.x * sb + p.y * cb, p.z);
+        let turned = glam::Vec3::new(bent.x * cy - bent.z * sy, bent.y, bent.x * sy + bent.z * cy);
+        (pivot + turned).to_array()
+    };
+    let corners = [
+        transform(false, false, false),
+        transform(true, false, false),
+        transform(true, false, true),
+        transform(false, false, true),
+        transform(false, true, false),
+        transform(true, true, false),
+        transform(true, true, true),
+        transform(false, true, true),
+    ];
+    const FACES: [[usize; 4]; 6] = [
+        [4, 7, 6, 5],
+        [0, 1, 2, 3],
+        [3, 2, 6, 7],
+        [1, 0, 4, 5],
+        [2, 1, 5, 6],
+        [0, 3, 7, 4],
+    ];
+    const BOX_UV: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+
+    for (face_index, face) in FACES.iter().enumerate() {
+        let rect = crate::texture::tile_uv_rect(tiles[face_index]);
+        let base = verts.len() as u32;
+        for (corner_index, &corner) in face.iter().enumerate() {
+            let uv = BOX_UV[corner_index];
+            verts.push(Vertex {
+                pos: corners[corner],
+                color,
+                light: crate::config::FACE_SHADE[face_index],
+                uv: [
+                    rect[0] + (rect[2] - rect[0]) * uv[0],
+                    rect[1] + (rect[3] - rect[1]) * uv[1],
                 ],
             });
         }

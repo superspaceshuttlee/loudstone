@@ -193,7 +193,10 @@ impl Eq for Node {}
 impl Ord for Node {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reversed: BinaryHeap is a max-heap, we want the lowest f first.
-        other.f.total_cmp(&self.f).then_with(|| other.order.cmp(&self.order))
+        other
+            .f
+            .total_cmp(&self.f)
+            .then_with(|| other.order.cmp(&self.order))
     }
 }
 impl PartialOrd for Node {
@@ -286,7 +289,12 @@ pub fn find_path<W: VoxelWorld + ?Sized>(
     let mut came: HashMap<IVec3, (f32, IVec3)> = HashMap::new();
     let mut open: BinaryHeap<Node> = BinaryHeap::new();
     came.insert(start, (0.0, start));
-    open.push(Node { f: heuristic(start, goal), g: 0.0, order: 0, cell: start });
+    open.push(Node {
+        f: heuristic(start, goal),
+        g: 0.0,
+        order: 0,
+        cell: start,
+    });
 
     let mut order = 1u32;
     let mut expanded = 0usize;
@@ -327,7 +335,12 @@ pub fn find_path<W: VoxelWorld + ?Sized>(
             if h < best.0 || (h == best.0 && ng < best.1) {
                 best = (h, ng, next);
             }
-            open.push(Node { f: ng + h, g: ng, order, cell: next });
+            open.push(Node {
+                f: ng + h,
+                g: ng,
+                order,
+                cell: next,
+            });
             order = order.wrapping_add(1);
         }
     }
@@ -402,7 +415,10 @@ mod tests {
                 "path went through the wall at {wp:?}"
             );
         }
-        assert!(p.waypoints.len() > 9, "the detour must be longer than the direct route");
+        assert!(
+            p.waypoints.len() > 9,
+            "the detour must be longer than the direct route"
+        );
     }
 
     #[test]
@@ -427,7 +443,10 @@ mod tests {
         let p = find_path(&w, feet(0, 0), feet(20, 0), MAX_EXPANDED_NODES);
         assert!(!p.reached_goal);
         assert_eq!(p.waypoints, vec![feet(0, 0)], "nowhere to go but stay put");
-        assert!(!p.truncated, "an enclosed start exhausts, it does not hit the cap");
+        assert!(
+            !p.truncated,
+            "an enclosed start exhausts, it does not hit the cap"
+        );
     }
 
     #[test]
@@ -438,19 +457,35 @@ mod tests {
         let p = find_path(&w, feet(0, 0), feet(40, 0), cap);
         assert!(p.truncated, "should have hit the cap: {p:?}");
         assert!(!p.reached_goal);
-        assert!(p.expanded <= cap, "expanded {} exceeds cap {}", p.expanded, cap);
-        assert!(p.waypoints.len() > 1, "a partial path must still make progress");
+        assert!(
+            p.expanded <= cap,
+            "expanded {} exceeds cap {}",
+            p.expanded,
+            cap
+        );
+        assert!(
+            p.waypoints.len() > 1,
+            "a partial path must still make progress"
+        );
         let end = p.end().unwrap();
         let start_d = (feet(40, 0) - feet(0, 0)).abs().element_sum();
         let end_d = (feet(40, 0) - end).abs().element_sum();
-        assert!(end_d < start_d, "the partial path must get closer to the goal");
+        assert!(
+            end_d < start_d,
+            "the partial path must get closer to the goal"
+        );
     }
 
     #[test]
     fn steps_up_one_block_but_not_two() {
         let mut w = flat();
         w.fill((4, GROUND + 1, -48), (4, GROUND + 1, 48), BlockId::STONE); // 1-high lip
-        let p = find_path(&w, feet(0, 0), IVec3::new(8, GROUND + 1, 0), MAX_EXPANDED_NODES);
+        let p = find_path(
+            &w,
+            feet(0, 0),
+            IVec3::new(8, GROUND + 1, 0),
+            MAX_EXPANDED_NODES,
+        );
         assert!(p.reached_goal, "a one-block lip is walkable: {p:?}");
         assert!(
             p.waypoints.iter().any(|c| c.y == GROUND + 2),
@@ -459,8 +494,16 @@ mod tests {
 
         let mut w2 = flat();
         w2.fill((4, GROUND + 1, -48), (4, GROUND + 2, 48), BlockId::STONE); // 2-high wall
-        let p2 = find_path(&w2, feet(0, 0), IVec3::new(8, GROUND + 1, 0), MAX_EXPANDED_NODES);
-        assert!(!p2.reached_goal, "a two-block wall with no way round must fail: {p2:?}");
+        let p2 = find_path(
+            &w2,
+            feet(0, 0),
+            IVec3::new(8, GROUND + 1, 0),
+            MAX_EXPANDED_NODES,
+        );
+        assert!(
+            !p2.reached_goal,
+            "a two-block wall with no way round must fail: {p2:?}"
+        );
     }
 
     #[test]
@@ -469,14 +512,27 @@ mod tests {
         let mut w = MockWorld::air();
         w.fill((-8, GROUND - 2, -8), (0, GROUND, 8), BlockId::STONE);
         w.fill((1, GROUND - 5, -8), (12, GROUND - 3, 8), BlockId::STONE);
-        let p = find_path(&w, feet(0, 0), IVec3::new(6, GROUND - 2, 0), MAX_EXPANDED_NODES);
+        let p = find_path(
+            &w,
+            feet(0, 0),
+            IVec3::new(6, GROUND - 2, 0),
+            MAX_EXPANDED_NODES,
+        );
         assert!(p.reached_goal, "a three-block drop is allowed: {p:?}");
 
         let mut deep = MockWorld::air();
         deep.fill((-8, GROUND - 2, -8), (0, GROUND, 8), BlockId::STONE);
         deep.fill((1, GROUND - 7, -8), (12, GROUND - 5, 8), BlockId::STONE);
-        let p2 = find_path(&deep, feet(0, 0), IVec3::new(6, GROUND - 4, 0), MAX_EXPANDED_NODES);
-        assert!(!p2.reached_goal, "a five-block drop must be refused: {p2:?}");
+        let p2 = find_path(
+            &deep,
+            feet(0, 0),
+            IVec3::new(6, GROUND - 4, 0),
+            MAX_EXPANDED_NODES,
+        );
+        assert!(
+            !p2.reached_goal,
+            "a five-block drop must be refused: {p2:?}"
+        );
     }
 
     #[test]
@@ -534,8 +590,14 @@ mod tests {
         }
         assert!(chewed.fill_ratio(4, GROUND + 1, 0) < PASSABLE_FILL);
         let after = find_path(&chewed, feet(0, 0), feet(8, 0), MAX_EXPANDED_NODES);
-        assert!(after.reached_goal, "a mostly-hollow block must be passable: {after:?}");
-        assert!(after.waypoints.contains(&feet(4, 0)), "it should go straight through");
+        assert!(
+            after.reached_goal,
+            "a mostly-hollow block must be passable: {after:?}"
+        );
+        assert!(
+            after.waypoints.contains(&feet(4, 0)),
+            "it should go straight through"
+        );
     }
 
     #[test]
@@ -554,7 +616,10 @@ mod tests {
                 }
             }
         }
-        assert!(bored.fill_ratio(4, GROUND + 1, 0) > PASSABLE_FILL, "still mostly solid");
+        assert!(
+            bored.fill_ratio(4, GROUND + 1, 0) > PASSABLE_FILL,
+            "still mostly solid"
+        );
         let p = find_path(&bored, feet(0, 0), feet(8, 0), MAX_EXPANDED_NODES);
         assert!(p.reached_goal, "a bored core must be passable: {p:?}");
         assert!(p.waypoints.contains(&feet(4, 0)));

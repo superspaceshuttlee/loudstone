@@ -102,13 +102,22 @@ pub struct NoiseEvent {
 
 impl NoiseEvent {
     pub fn chip(pos: Vec3) -> Self {
-        Self { pos, loudness: LOUDNESS_CHIP }
+        Self {
+            pos,
+            loudness: LOUDNESS_CHIP,
+        }
     }
     pub fn smash(pos: Vec3) -> Self {
-        Self { pos, loudness: LOUDNESS_SMASH }
+        Self {
+            pos,
+            loudness: LOUDNESS_SMASH,
+        }
     }
     pub fn explosion(pos: Vec3) -> Self {
-        Self { pos, loudness: LOUDNESS_EXPLOSION }
+        Self {
+            pos,
+            loudness: LOUDNESS_EXPLOSION,
+        }
     }
 }
 
@@ -215,13 +224,21 @@ impl Propagation {
     /// attenuation for every block crossed. Stops at `VISIT_BUDGET` nodes, or earlier
     /// once even the shortest remaining path is inaudible.
     pub fn flood<W: VoxelWorld + ?Sized>(world: &W, origin: Vec3, loudness: f32) -> Self {
-        let loudness = if loudness.is_finite() { loudness.max(0.0) } else { 0.0 };
+        let loudness = if loudness.is_finite() {
+            loudness.max(0.0)
+        } else {
+            0.0
+        };
         let origin_block = origin.floor().as_ivec3();
         let mut cost: HashMap<IVec3, f32> = HashMap::new();
         let mut heap: BinaryHeap<Frontier> = BinaryHeap::new();
 
         cost.insert(IVec3::ZERO, 0.0);
-        heap.push(Frontier { key: 0.0, travel: 0.0, node: IVec3::ZERO });
+        heap.push(Frontier {
+            key: 0.0,
+            travel: 0.0,
+            node: IVec3::ZERO,
+        });
 
         // A node is worth expanding only while the source could still be heard there.
         // `key` (travel + distance penalty) is exactly `-ln(audibility / loudness)`,
@@ -268,7 +285,11 @@ impl Propagation {
                 };
                 if better {
                     cost.insert(next, nt);
-                    heap.push(Frontier { key: nk, travel: nt, node: next });
+                    heap.push(Frontier {
+                        key: nk,
+                        travel: nt,
+                        node: next,
+                    });
                 }
             }
         }
@@ -440,7 +461,11 @@ impl SoundField {
             }
             let ev = self.pending.swap_remove(best);
             let field = Propagation::flood(world, ev.pos, ev.loudness);
-            self.push_active(ActiveSound { field, loudness: ev.loudness, age: 0.0 });
+            self.push_active(ActiveSound {
+                field,
+                loudness: ev.loudness,
+                age: 0.0,
+            });
         }
     }
 
@@ -474,7 +499,11 @@ impl SoundField {
             }
         }
         let field = Propagation::flood(world, ev.pos, ev.loudness);
-        self.push_active(ActiveSound { field, loudness: ev.loudness, age: 0.0 });
+        self.push_active(ActiveSound {
+            field,
+            loudness: ev.loudness,
+            age: 0.0,
+        });
     }
 
     /// Loudness of the single loudest audible sound at `listener`, or 0.
@@ -500,7 +529,10 @@ impl SoundField {
                 continue;
             }
             if best.is_none_or(|b| a > b.loudness) {
-                best = Some(Heard { pos: s.field.origin(), loudness: a });
+                best = Some(Heard {
+                    pos: s.field.origin(),
+                    loudness: a,
+                });
             }
         }
         best
@@ -550,11 +582,17 @@ pub mod mock {
 
     impl MockWorld {
         pub fn air() -> Self {
-            Self { background: BlockId::AIR, ..Default::default() }
+            Self {
+                background: BlockId::AIR,
+                ..Default::default()
+            }
         }
 
         pub fn solid_stone() -> Self {
-            Self { background: BlockId::STONE, ..Default::default() }
+            Self {
+                background: BlockId::STONE,
+                ..Default::default()
+            }
         }
 
         pub fn set(&mut self, x: i32, y: i32, z: i32, id: BlockId) {
@@ -575,7 +613,11 @@ pub mod mock {
         /// A flat stone floor at `y = ground` with air above, over the given extent.
         pub fn flat_ground(extent: i32, ground: i32) -> Self {
             let mut w = Self::air();
-            w.fill((-extent, ground - 3, -extent), (extent, ground, extent), BlockId::STONE);
+            w.fill(
+                (-extent, ground - 3, -extent),
+                (extent, ground, extent),
+                BlockId::STONE,
+            );
             w
         }
 
@@ -658,7 +700,10 @@ mod tests {
         let through_air = Propagation::flood(&air, src, LOUDNESS_SMASH).audibility_at(listener);
         let through_rock = Propagation::flood(&stone, src, LOUDNESS_SMASH).audibility_at(listener);
 
-        assert!(through_air > HEARING_THRESHOLD, "air path should be clearly audible: {through_air}");
+        assert!(
+            through_air > HEARING_THRESHOLD,
+            "air path should be clearly audible: {through_air}"
+        );
         assert!(
             through_rock < through_air / 100.0,
             "10 blocks of stone must be dramatically quieter: air={through_air} rock={through_rock}"
@@ -678,11 +723,18 @@ mod tests {
         let src = v(0.5, 64.5, 0.5);
         let listener = v(8.5, 64.5, 0.5);
 
-        let open = Propagation::flood(&MockWorld::air(), src, LOUDNESS_SMASH).audibility_at(listener);
+        let open =
+            Propagation::flood(&MockWorld::air(), src, LOUDNESS_SMASH).audibility_at(listener);
         let walled = Propagation::flood(&w, src, LOUDNESS_SMASH).audibility_at(listener);
 
-        assert!(walled < open * 0.6, "one wall should noticeably muffle: open={open} walled={walled}");
-        assert!(walled > 0.0, "one wall should not silence completely: {walled}");
+        assert!(
+            walled < open * 0.6,
+            "one wall should noticeably muffle: open={open} walled={walled}"
+        );
+        assert!(
+            walled > 0.0,
+            "one wall should not silence completely: {walled}"
+        );
     }
 
     #[test]
@@ -698,8 +750,14 @@ mod tests {
             .audibility_at(listener);
         let bored = Propagation::flood(&tunnel, src, LOUDNESS_SMASH).audibility_at(listener);
 
-        assert!(bored > solid * 1000.0, "the player's own tunnel must carry sound: solid={solid} bored={bored}");
-        assert!(bored > HEARING_THRESHOLD, "down a tunnel a smash is audible: {bored}");
+        assert!(
+            bored > solid * 1000.0,
+            "the player's own tunnel must carry sound: solid={solid} bored={bored}"
+        );
+        assert!(
+            bored > HEARING_THRESHOLD,
+            "down a tunnel a smash is audible: {bored}"
+        );
     }
 
     /// Two air pockets buried in solid stone, separated by a stone wall `thickness`
@@ -722,7 +780,10 @@ mod tests {
         let two = Propagation::flood(&pocket_world(2), src, loud).audibility_at(listener);
         let three = Propagation::flood(&pocket_world(3), src, loud).audibility_at(listener);
 
-        assert!(one > two && two > three && three > 0.0, "{one} {two} {three}");
+        assert!(
+            one > two && two > three && three > 0.0,
+            "{one} {two} {three}"
+        );
         // Each extra block of stone should cost exactly exp(SOLID_ATTENUATION).
         let expected = SOLID_ATTENUATION_PER_BLOCK.exp();
         for ratio in [one / two, two / three] {
@@ -753,11 +814,14 @@ mod tests {
         let src = v(0.5, 64.5, 0.5);
         let listener = v(8.5, 64.5, 0.5);
 
-        let solid = Propagation::flood(&pocket_world(2), src, LOUDNESS_EXPLOSION)
-            .audibility_at(listener);
+        let solid =
+            Propagation::flood(&pocket_world(2), src, LOUDNESS_EXPLOSION).audibility_at(listener);
         let half = Propagation::flood(&chewed, src, LOUDNESS_EXPLOSION).audibility_at(listener);
         assert!(solid > 0.0, "the control case must be audible at all");
-        assert!(half > solid * 2.0, "half-carved rock must damp less: solid={solid} half={half}");
+        assert!(
+            half > solid * 2.0,
+            "half-carved rock must damp less: solid={solid} half={half}"
+        );
     }
 
     #[test]
@@ -769,8 +833,14 @@ mod tests {
         let chip = Propagation::flood(&air, src, LOUDNESS_CHIP).audibility_at(listener);
         let smash = Propagation::flood(&air, src, LOUDNESS_SMASH).audibility_at(listener);
 
-        assert!(chip < HEARING_THRESHOLD, "a quiet chip must not carry 16 blocks: {chip}");
-        assert!(smash > HEARING_THRESHOLD, "a loud smash must carry 16 blocks: {smash}");
+        assert!(
+            chip < HEARING_THRESHOLD,
+            "a quiet chip must not carry 16 blocks: {chip}"
+        );
+        assert!(
+            smash > HEARING_THRESHOLD,
+            "a loud smash must carry 16 blocks: {smash}"
+        );
     }
 
     #[test]
@@ -778,16 +848,30 @@ mod tests {
         let air = MockWorld::air();
         // A very loud sound in wide-open air is the pathological case.
         let p = Propagation::flood(&air, v(0.5, 128.5, 0.5), 50.0);
-        assert!(p.visited <= VISIT_BUDGET, "visited {} exceeds budget", p.visited);
-        assert!(p.budget_exhausted, "this case should be budget bound, not audibility bound");
+        assert!(
+            p.visited <= VISIT_BUDGET,
+            "visited {} exceeds budget",
+            p.visited
+        );
+        assert!(
+            p.budget_exhausted,
+            "this case should be budget bound, not audibility bound"
+        );
     }
 
     #[test]
     fn quiet_flood_stops_early_without_using_the_whole_budget() {
         let air = MockWorld::air();
         let p = Propagation::flood(&air, v(0.5, 128.5, 0.5), LOUDNESS_CHIP);
-        assert!(!p.budget_exhausted, "a chip should be audibility bound, not budget bound");
-        assert!(p.visited < VISIT_BUDGET / 2, "a chip flood should be cheap: {}", p.visited);
+        assert!(
+            !p.budget_exhausted,
+            "a chip should be audibility bound, not budget bound"
+        );
+        assert!(
+            p.visited < VISIT_BUDGET / 2,
+            "a chip flood should be cheap: {}",
+            p.visited
+        );
     }
 
     #[test]
@@ -838,7 +922,11 @@ mod tests {
             f.emit_chip(v(4.5, 64.5, 4.5));
             f.update(&air, 1.0 / 60.0);
         }
-        assert_eq!(f.active_count(), 1, "continuous chipping must not spawn many floods");
+        assert_eq!(
+            f.active_count(),
+            1,
+            "continuous chipping must not spawn many floods"
+        );
     }
 
     #[test]
@@ -852,7 +940,9 @@ mod tests {
         f.update(&air, 0.016);
         f.update(&air, 0.016);
 
-        let heard = f.loudest_at(v(0.5, 64.5, 0.5)).expect("something should be audible");
+        let heard = f
+            .loudest_at(v(0.5, 64.5, 0.5))
+            .expect("something should be audible");
         assert!(
             (heard.pos - loud).length() < 1.0,
             "the loud smash should win even though it is further: {:?}",

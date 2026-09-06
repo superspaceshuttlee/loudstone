@@ -910,8 +910,13 @@ impl TerrainGen {
         let (xf, zf) = (x as f64, z as f64);
 
         // --- height ---------------------------------------------------------
-        let cont_raw =
-            Self::fbm2(&self.continent, xf, zf, t::CONTINENT_SCALE, t::CONTINENT_OCTAVES);
+        let cont_raw = Self::fbm2(
+            &self.continent,
+            xf,
+            zf,
+            t::CONTINENT_SCALE,
+            t::CONTINENT_OCTAVES,
+        );
         let cont = (cont_raw * t::CONTINENT_GAIN + t::CONTINENT_BIAS).clamp(-1.0, 1.0);
         let continental = spline(t::CONTINENT_SPLINE, cont);
 
@@ -980,8 +985,8 @@ impl TerrainGen {
         let surface = (h as i32).clamp(1, t::MAX_TERRAIN_Y);
 
         // --- climate, corrected for altitude --------------------------------
-        let temp = (temp0 - (surface - t::WATER_LEVEL).max(0) as f32 * t::TEMP_LAPSE)
-            .clamp(0.0, 1.0);
+        let temp =
+            (temp0 - (surface - t::WATER_LEVEL).max(0) as f32 * t::TEMP_LAPSE).clamp(0.0, 1.0);
         let humid = humid0;
 
         // --- alpine rock ----------------------------------------------------
@@ -1069,7 +1074,11 @@ impl TerrainGen {
                 .seabed
                 .get([x as f64 * t::SEABED_SCALE, z as f64 * t::SEABED_SCALE])
                 + jitter;
-            col.biome = if river > 0.5 { Biome::River } else { Biome::Ocean };
+            col.biome = if river > 0.5 {
+                Biome::River
+            } else {
+                Biome::Ocean
+            };
             col.top = if s > t::WATER_LEVEL - 8 && n > 0.25 {
                 BlockId::CLAY
             } else if n < -0.2 {
@@ -1116,8 +1125,7 @@ impl TerrainGen {
         }
 
         // Snow cover. Also dithered, so a snowline is a scatter, not a contour.
-        let snow_edge =
-            t::SNOW_TEMP + 0.05 * (unit(hash2(self.seed, x, z, t::SALT_SNOW)) - 0.5);
+        let snow_edge = t::SNOW_TEMP + 0.05 * (unit(hash2(self.seed, x, z, t::SALT_SNOW)) - 0.5);
         if col.temp < snow_edge {
             if col.top == BlockId::STONE {
                 col.filler = BlockId::STONE;
@@ -1224,11 +1232,7 @@ impl TerrainGen {
         }
 
         let s = t::CAVE_SCALE;
-        let p = [
-            x as f64 * s,
-            y as f64 * s * t::CAVE_Y_SQUASH,
-            z as f64 * s,
-        ];
+        let p = [x as f64 * s, y as f64 * s * t::CAVE_Y_SQUASH, z as f64 * s];
         let a = Self::fbm3(&self.cave_a, p, t::CAVE_OCTAVES);
         if a.abs() < t::CAVE_RADIUS {
             let b = Self::fbm3(&self.cave_b, p, t::CAVE_OCTAVES);
@@ -1387,9 +1391,8 @@ impl TerrainGen {
                                         if col.surface - wy <= col.filler_depth {
                                             continue;
                                         }
-                                        let i =
-                                            local_index(lx as usize, ly as usize, lz as usize)
-                                                as usize;
+                                        let i = local_index(lx as usize, ly as usize, lz as usize)
+                                            as usize;
                                         if blocks[i] != BlockId::STONE {
                                             continue;
                                         }
@@ -1711,8 +1714,8 @@ impl TerrainGen {
                             if wy <= cols[(lz * cs + lx) as usize].surface {
                                 continue;
                             }
-                            let i = local_index(lx as usize, (wy - oy) as usize, lz as usize)
-                                as usize;
+                            let i =
+                                local_index(lx as usize, (wy - oy) as usize, lz as usize) as usize;
                             if !blocks[i].is_air() {
                                 continue; // an earlier tree already claimed it
                             }
@@ -1732,8 +1735,7 @@ impl TerrainGen {
                     if wy < oy || wy >= oy + cs {
                         continue;
                     }
-                    let i =
-                        local_index(lx as usize, (wy - oy) as usize, lz as usize) as usize;
+                    let i = local_index(lx as usize, (wy - oy) as usize, lz as usize) as usize;
                     if !blocks[i].is_air() {
                         continue;
                     }
@@ -2158,10 +2160,7 @@ mod tests {
                             for x in 0..CHUNK_SIZE {
                                 let b = c.get(x, y, z);
                                 if !b.is_air() {
-                                    world.insert(
-                                        (ox + x as i32, oy + y as i32, oz + z as i32),
-                                        b,
-                                    );
+                                    world.insert((ox + x as i32, oy + y as i32, oz + z as i32), b);
                                 }
                             }
                         }
@@ -2185,10 +2184,7 @@ mod tests {
             // The block under a trunk is either more trunk or the ground it
             // grew out of -- never air.
             let below = world.get(&(x, y - 1, z)).copied().unwrap_or(BlockId::AIR);
-            assert!(
-                !below.is_air(),
-                "trunk at {x},{y},{z} is floating over air"
-            );
+            assert!(!below.is_air(), "trunk at {x},{y},{z} is floating over air");
             trunks += 1;
 
             // A trunk's canopy must exist. Search the block above the trunk top.
@@ -2228,7 +2224,10 @@ mod tests {
                 crossings += 1;
             }
         }
-        assert!(trunks > 10, "no trees in the sample ({trunks} trunk blocks)");
+        assert!(
+            trunks > 10,
+            "no trees in the sample ({trunks} trunk blocks)"
+        );
         assert!(
             crossings > 0,
             "no tree in the sample straddles a chunk boundary, so this test proved nothing"

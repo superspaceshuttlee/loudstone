@@ -9,27 +9,21 @@ it is a bug that has already been paid for once.
 ## 0. If you are an AI assistant reading this without the repo
 
 This document describes a codebase living at `C:\Users\aavig\dev\loudstone` on
-the owner's machine. It is a **local git repository with no remote** — nothing is
-pushed to GitHub, so you cannot fetch it.
-
-That means: this file tells you what exists, how it fits together, and what will
-break if you change it carelessly — but **you cannot read or edit any source file
-unless the owner gives you access.** Do not guess at the contents of a file and
-propose a patch against it; ask for the file.
+the owner's machine. Repository access depends on the environment in which this
+file is being read. Inspect the checkout and its configured remotes instead of
+assuming that source access or a GitHub remote is unavailable.
 
 Three ways to work, in increasing order of usefulness:
 
 1. **The owner pastes in the file(s) for the task.** Best for a focused change —
    "make night darker" needs `config.rs` and `light.rs`, nothing else. Ask for
    exactly what you need.
-2. **The owner pushes the repo to GitHub** (`git remote add origin ...`, then
-   `git push -u origin master`). Then an agentic coding tool connected to that
-   repo can read and edit it directly. This is the real answer if you are meant
-   to make changes rather than advise. It is 38 tracked files, under a megabyte.
+2. **The owner grants access to the repository.** An agentic coding tool
+   connected to it can then read, edit, and run the project directly.
 3. **The owner runs an agentic CLI locally** in that directory, which already has
    filesystem access.
 
-Whatever you do, verify with `cargo test` (357 tests) and, for anything visual,
+Whatever you do, verify with `cargo test` and, for anything visual,
 `cargo run --release -- --shot shots/x.png` and actually look at the PNG.
 
 ### Current state, as of the last commit
@@ -38,17 +32,14 @@ Playable and complete for its scope: biomes, water, trees, caves, ores, lighting
 with a day/night cycle, mining, crafting, smelting, tool tiers, four mob kinds
 with sound-driven AI, saves, generated textures, and synthesised audio.
 
-Two pieces of work are **deliberately half-finished** and committed that way:
+The content registry in `src/registry.rs`, backed by `assets/data/*.ron`, is the
+source of truth for block and item properties, recipes, and smelting rules. Rust
+keeps the stable numeric ID constants required by save compatibility and match
+patterns.
 
-- `src/registry.rs` and `assets/data/*.ron` exist, but block and item properties
-  are **still defined in Rust** in `block.rs` / `item.rs`. The registry is not yet
-  the source of truth. Finishing it is the single biggest unblock for adding
-  content quickly — see gap list at the end.
-- The save format gained mob and container sections (`INTEGRATION_saves.md`
-  describes them), but `main.rs` does **not** yet collect mobs or furnace
-  contents into `SaveData` before writing. So they still do not survive a reload.
-
-Both compile, all tests pass, and neither affects playing the game.
+Mob and furnace state crosses the runtime/save boundary in `main.rs`: live state
+is captured before saves and restored when the application starts. The generic
+container records remain forward-compatible with future container kinds.
 
 ---
 
@@ -78,8 +69,8 @@ compiles and the tests pass.
 
 ```bash
 cargo run --release            # play
-cargo test                     # ~315 tests, all must pass
-cargo clippy                   # clean
+cargo test                     # all tests must pass
+cargo clippy --all-targets --all-features
 ```
 
 Diagnostics that let you see the game without a human at the keyboard — use
@@ -114,6 +105,7 @@ project's history were invisible to tests and obvious in a screenshot.
 | `light.rs` | Block and sky light, flood propagation and de-lighting |
 | `gfx.rs` | wgpu device, terrain pipeline, atlas upload, highlight, entity geometry |
 | `texture.rs` | The generated texture atlas and every block/item/mob tile |
+| `registry.rs` / `assets/data/*.ron` | Validated block, item, recipe, and smelting data |
 | `shader.wgsl` / `hud.wgsl` | Terrain and overlay shaders |
 | `hud.rs` | Overlay: crosshair, hotbar, health, panels, and a hand-coded 5x7 font |
 | `camera.rs` | Camera, player body, physics, collision, step-up |
@@ -140,7 +132,8 @@ Each of these was a real bug. Breaking one costs a day.
 **Every world mutation needs its `note_*` twin.** `world.set_block` pairs with
 `data.edits.note_set_block`, `world.carve` with `note_carve`. The `ChangeTracker`
 is the durable record of player edits; an unnoted edit vanishes the moment its
-chunk streams out. There are only three call sites — mining, smashing, placing.
+chunk streams out. Direct player actions record their matching edit, while mob
+mutations pass through `TrackedWorld`, which records every carve and block set.
 
 **Nothing touching wgpu leaves the main thread.** Generation and meshing run on
 rayon and report over channels; the main thread does every GPU call.
@@ -235,7 +228,7 @@ The owner dials look and feel by hand. When a change is about how something
 
 Three layers, and they catch different things.
 
-**Unit tests (~315).** Pure logic: recipes, inventory maths, save round-trips,
+**Unit tests.** Pure logic: recipes, inventory maths, save round-trips,
 pathfinding, sound falloff, meshing invariants (a sealed chunk meshes to zero
 vertices; an isolated block meshes to exactly six quads).
 

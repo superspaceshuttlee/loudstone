@@ -510,7 +510,7 @@ pub fn update_for_block_change<V: LightVolume + ?Sized>(v: &mut V, x: i32, y: i3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{local_index, ChunkPos};
+    use crate::chunk::{ChunkPos, local_index};
     use crate::config::WORLD_HEIGHT;
     use std::collections::HashMap;
 
@@ -603,7 +603,11 @@ mod tests {
         for d in 1..=14 {
             assert_eq!(g.block_light(d, 0, 0), 14 - d as u8, "at distance {d}");
         }
-        assert_eq!(g.block_light(15, 0, 0), 0, "light must die out at 14 blocks");
+        assert_eq!(
+            g.block_light(15, 0, 0),
+            0,
+            "light must die out at 14 blocks"
+        );
         // Diagonals decay by manhattan distance, as a flood fill should.
         assert_eq!(g.block_light(3, 2, 1), 14 - 6);
     }
@@ -658,12 +662,20 @@ mod tests {
         g.set((6, 0, 0), BlockId::TORCH);
         update_for_block_change(&mut g, 6, 0, 0);
         assert_eq!(g.block_light(6, 0, 0), 14);
-        assert_eq!(g.block_light(3, 0, 0), 11, "the nearer torch wins the middle");
+        assert_eq!(
+            g.block_light(3, 0, 0),
+            11,
+            "the nearer torch wins the middle"
+        );
 
         g.set((0, 0, 0), BlockId::AIR);
         update_for_block_change(&mut g, 0, 0, 0);
         assert_eq!(g.block_light(6, 0, 0), 14, "the survivor must stay lit");
-        assert_eq!(g.block_light(0, 0, 0), 8, "and must relight what it can reach");
+        assert_eq!(
+            g.block_light(0, 0, 0),
+            8,
+            "and must relight what it can reach"
+        );
         assert_eq!(g.block_light(-7, 0, 0), 1);
         assert_eq!(g.block_light(-8, 0, 0), 0);
     }
@@ -677,7 +689,11 @@ mod tests {
         q.push_back((0, 20, 0));
         spread(&mut g, q, true);
         for y in 0..=20 {
-            assert_eq!(g.sky_light(0, y, 0), 15, "a shaft must stay bright at y={y}");
+            assert_eq!(
+                g.sky_light(0, y, 0),
+                15,
+                "a shaft must stay bright at y={y}"
+            );
         }
         // Sideways it decays like any other light.
         assert_eq!(g.sky_light(4, 10, 0), 11);

@@ -183,8 +183,12 @@ pub enum MobKind {
 }
 
 impl MobKind {
-    pub const ALL: [MobKind; 4] =
-        [MobKind::Zombie, MobKind::Skeleton, MobKind::Creeper, MobKind::Pig];
+    pub const ALL: [MobKind; 4] = [
+        MobKind::Zombie,
+        MobKind::Skeleton,
+        MobKind::Creeper,
+        MobKind::Pig,
+    ];
     pub const HOSTILES: [MobKind; 3] = [MobKind::Zombie, MobKind::Skeleton, MobKind::Creeper];
 
     pub fn stats(self) -> MobStats {
@@ -269,11 +273,26 @@ pub enum DropKind {
 /// Everything that happened this tick that the rest of the game must react to.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MobEvent {
-    PlayerDamaged { amount: f32, source: MobKind, from: Vec3 },
-    MobDied { id: u32, kind: MobKind, pos: Vec3 },
-    Drop { kind: DropKind, pos: Vec3, count: u32 },
+    PlayerDamaged {
+        amount: f32,
+        source: MobKind,
+        from: Vec3,
+    },
+    MobDied {
+        id: u32,
+        kind: MobKind,
+        pos: Vec3,
+    },
+    Drop {
+        kind: DropKind,
+        pos: Vec3,
+        count: u32,
+    },
     /// A creeper went off. The world has already been carved when you see this.
-    Exploded { pos: Vec3, radius: f32 },
+    Exploded {
+        pos: Vec3,
+        radius: f32,
+    },
 }
 
 /// What mob AI needs to know about the player. Built fresh each tick.
@@ -289,7 +308,11 @@ pub struct PlayerState {
 
 impl PlayerState {
     pub fn new(pos: Vec3, eye_height: f32) -> Self {
-        Self { pos, eye: pos + Vec3::Y * eye_height, alive: true }
+        Self {
+            pos,
+            eye: pos + Vec3::Y * eye_height,
+            alive: true,
+        }
     }
 }
 
@@ -383,7 +406,11 @@ impl Mob {
 
     /// 0 when not fusing, ramping to 1 at detonation. Renderers flash on this.
     pub fn fuse_fraction(&self) -> f32 {
-        if self.state == MobState::Fuse { (self.fuse / FUSE_TIME).clamp(0.0, 1.0) } else { 0.0 }
+        if self.state == MobState::Fuse {
+            (self.fuse / FUSE_TIME).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
     /// Cell the mob's feet are in.
@@ -425,7 +452,11 @@ fn resolve_axis<W: VoxelWorld + ?Sized>(
     let b1 = (mx - Vec3::splat(SKIN)).floor().as_ivec3();
 
     let mut hit = false;
-    let mut limit = if delta > 0.0 { f32::INFINITY } else { f32::NEG_INFINITY };
+    let mut limit = if delta > 0.0 {
+        f32::INFINITY
+    } else {
+        f32::NEG_INFINITY
+    };
     for x in b0.x..=b1.x {
         for y in b0.y..=b1.y {
             for z in b0.z..=b1.z {
@@ -444,10 +475,18 @@ fn resolve_axis<W: VoxelWorld + ?Sized>(
     }
     if hit {
         if axis == 1 {
-            pos.y = if delta > 0.0 { limit - size.y - SKIN } else { limit + SKIN };
+            pos.y = if delta > 0.0 {
+                limit - size.y - SKIN
+            } else {
+                limit + SKIN
+            };
         } else {
             let half = size[axis] * 0.5;
-            pos[axis] = if delta > 0.0 { limit - half - SKIN } else { limit + half + SKIN };
+            pos[axis] = if delta > 0.0 {
+                limit - half - SKIN
+            } else {
+                limit + half + SKIN
+            };
         }
     }
     hit
@@ -502,9 +541,21 @@ fn line_of_sight<W: VoxelWorld + ?Sized>(world: &W, from: Vec3, to: Vec3) -> boo
     );
     // Distance along the ray to the next grid plane on each axis, and per-cell spacing.
     let inv = Vec3::new(
-        if dir.x.abs() < 1.0e-6 { f32::INFINITY } else { 1.0 / dir.x.abs() },
-        if dir.y.abs() < 1.0e-6 { f32::INFINITY } else { 1.0 / dir.y.abs() },
-        if dir.z.abs() < 1.0e-6 { f32::INFINITY } else { 1.0 / dir.z.abs() },
+        if dir.x.abs() < 1.0e-6 {
+            f32::INFINITY
+        } else {
+            1.0 / dir.x.abs()
+        },
+        if dir.y.abs() < 1.0e-6 {
+            f32::INFINITY
+        } else {
+            1.0 / dir.y.abs()
+        },
+        if dir.z.abs() < 1.0e-6 {
+            f32::INFINITY
+        } else {
+            1.0 / dir.z.abs()
+        },
     );
     let mut t_max = Vec3::new(
         next_boundary(from.x, dir.x) * inv.x,
@@ -586,11 +637,7 @@ pub struct BlastReport {
 /// sub-voxel falls inside the blast are cleared with one `set_block` instead of 512
 /// carves -- otherwise a single creeper would cost a quarter of a million hash
 /// lookups and visibly hitch the frame.
-pub fn explode<W: VoxelWorld + ?Sized>(
-    world: &mut W,
-    centre: Vec3,
-    radius: f32,
-) -> BlastReport {
+pub fn explode<W: VoxelWorld + ?Sized>(world: &mut W, centre: Vec3, radius: f32) -> BlastReport {
     let mut report = BlastReport::default();
     if radius <= 0.0 {
         return report;
@@ -798,7 +845,11 @@ impl MobManager {
     fn kill(&mut self, id: u32, kind: MobKind, pos: Vec3) {
         self.events.push(MobEvent::MobDied { id, kind, pos });
         let count = if kind == MobKind::Pig { 2 } else { 1 };
-        self.events.push(MobEvent::Drop { kind: kind.drop_kind(), pos, count });
+        self.events.push(MobEvent::Drop {
+            kind: kind.drop_kind(),
+            pos,
+            count,
+        });
         self.mobs.retain(|m| m.id != id);
         self.projectiles.retain(|p| p.owner != id);
     }
@@ -860,7 +911,8 @@ impl MobManager {
 
     fn despawn_far(&mut self, player: &PlayerState) {
         let p = player.pos;
-        self.mobs.retain(|m| (m.pos - p).length() <= DESPAWN_DISTANCE);
+        self.mobs
+            .retain(|m| (m.pos - p).length() <= DESPAWN_DISTANCE);
     }
 
     fn reap_dead(&mut self) {
@@ -1120,8 +1172,7 @@ impl MobManager {
         if !mob.path.waypoints.is_empty() {
             while mob.path_index < mob.path.waypoints.len() {
                 let wp = waypoint_centre(mob.path.waypoints[mob.path_index]);
-                if horiz(wp - mob.pos).length() < WAYPOINT_RADIUS
-                    && (wp.y - mob.pos.y).abs() < 1.2
+                if horiz(wp - mob.pos).length() < WAYPOINT_RADIUS && (wp.y - mob.pos.y).abs() < 1.2
                 {
                     mob.path_index += 1;
                 } else {
@@ -1131,10 +1182,7 @@ impl MobManager {
             if mob.path_index < mob.path.waypoints.len() {
                 aim = waypoint_centre(mob.path.waypoints[mob.path_index]);
                 // A waypoint above us means climb: hop as we approach it.
-                if aim.y > mob.pos.y + 0.5
-                    && mob.on_ground
-                    && horiz(aim - mob.pos).length() < 1.4
-                {
+                if aim.y > mob.pos.y + 0.5 && mob.on_ground && horiz(aim - mob.pos).length() < 1.4 {
                     mob.vel.y = JUMP_SPEED;
                 }
             } else if mob.path.reached_goal {
@@ -1164,13 +1212,18 @@ impl MobManager {
         let ready: Vec<(u32, Vec3)> = self
             .mobs
             .iter()
-            .filter(|m| m.kind == MobKind::Creeper && m.state == MobState::Fuse && m.fuse >= FUSE_TIME)
+            .filter(|m| {
+                m.kind == MobKind::Creeper && m.state == MobState::Fuse && m.fuse >= FUSE_TIME
+            })
             .map(|m| (m.id, m.centre()))
             .collect();
 
         for (id, centre) in ready {
             explode(world, centre, EXPLOSION_RADIUS);
-            self.events.push(MobEvent::Exploded { pos: centre, radius: EXPLOSION_RADIUS });
+            self.events.push(MobEvent::Exploded {
+                pos: centre,
+                radius: EXPLOSION_RADIUS,
+            });
             // The blast is itself a very loud noise: every mob in earshot converges.
             sound.emit_immediate(world, NoiseEvent::explosion(centre));
 
@@ -1223,10 +1276,7 @@ impl MobManager {
             }
             a.vel.y += ARROW_GRAVITY * dt;
             let next = a.pos + a.vel * dt;
-            if player.alive
-                && next.cmpge(pmin).all()
-                && next.cmple(pmax).all()
-            {
+            if player.alive && next.cmpge(pmin).all() && next.cmple(pmax).all() {
                 hits.push((a.damage, a.pos));
                 return false;
             }
@@ -1271,8 +1321,12 @@ impl MobManager {
 
         for _ in 0..SPAWN_ATTEMPTS_PER_WAVE {
             let a = self.rng.random_range(0.0f32..std::f32::consts::TAU);
-            let r = self.rng.random_range(SPAWN_MIN_DISTANCE..SPAWN_MAX_DISTANCE);
-            let dy = self.rng.random_range(-SPAWN_VERTICAL_SPREAD..=SPAWN_VERTICAL_SPREAD);
+            let r = self
+                .rng
+                .random_range(SPAWN_MIN_DISTANCE..SPAWN_MAX_DISTANCE);
+            let dy = self
+                .rng
+                .random_range(-SPAWN_VERTICAL_SPREAD..=SPAWN_VERTICAL_SPREAD);
             let probe = IVec3::new(
                 (player.pos.x + a.cos() * r).floor() as i32,
                 player.pos.y.floor() as i32 + dy,
@@ -1324,7 +1378,11 @@ fn waypoint_centre(c: IVec3) -> Vec3 {
 }
 
 fn accelerate(mob: &mut Mob, want: Vec3, dt: f32) {
-    let rate = if mob.on_ground { GROUND_ACCEL } else { AIR_ACCEL };
+    let rate = if mob.on_ground {
+        GROUND_ACCEL
+    } else {
+        AIR_ACCEL
+    };
     let blend = (rate * dt).min(1.0);
     mob.vel.x += (want.x - mob.vel.x) * blend;
     mob.vel.z += (want.z - mob.vel.z) * blend;
@@ -1360,7 +1418,11 @@ fn ray_aabb(origin: Vec3, dir: Vec3, mn: Vec3, mx: Vec3) -> Option<f32> {
     let far = t0.max(t1);
     let t_near = near.max_element();
     let t_far = far.min_element();
-    if t_far < t_near.max(0.0) { None } else { Some(t_near.max(0.0)) }
+    if t_far < t_near.max(0.0) {
+        None
+    } else {
+        Some(t_near.max(0.0))
+    }
 }
 
 #[cfg(test)]
@@ -1422,8 +1484,17 @@ mod tests {
         run(&mut mgr, &mut w, &mut sound, &player, 5.0);
 
         let m = mgr.get(id).unwrap();
-        assert_eq!(m.state, MobState::Investigate, "should be investigating: {:?}", m.state);
-        assert!(m.pos.x > 4.0, "should have moved toward the noise, is at {:?}", m.pos);
+        assert_eq!(
+            m.state,
+            MobState::Investigate,
+            "should be investigating: {:?}",
+            m.state
+        );
+        assert!(
+            m.pos.x > 4.0,
+            "should have moved toward the noise, is at {:?}",
+            m.pos
+        );
         assert!(
             (m.target - noise).length() < 1.5,
             "the investigate target must be the SOUND position {noise:?}, got {:?}",
@@ -1455,7 +1526,11 @@ mod tests {
             "target must still be the sound, not the player: {:?}",
             m.target
         );
-        assert!(m.pos.z.abs() < 3.0, "must not have chased the player in -Z: {:?}", m.pos);
+        assert!(
+            m.pos.z.abs() < 3.0,
+            "must not have chased the player in -Z: {:?}",
+            m.pos
+        );
     }
 
     #[test]
@@ -1468,12 +1543,18 @@ mod tests {
             let mut sound = SoundField::new();
             let mut mgr = quiet_manager();
             let id = mgr.spawn(MobKind::Zombie, stand(0.0, 0.0));
-            sound.emit(NoiseEvent { pos: stand(dist, 0.0), loudness });
+            sound.emit(NoiseEvent {
+                pos: stand(dist, 0.0),
+                loudness,
+            });
             run(&mut mgr, &mut w, &mut sound, &player, 1.5);
             mgr.get(id).unwrap().state == MobState::Investigate
         };
 
-        assert!(!alerted(LOUDNESS_CHIP), "a chip must not carry {dist} blocks");
+        assert!(
+            !alerted(LOUDNESS_CHIP),
+            "a chip must not carry {dist} blocks"
+        );
         assert!(alerted(LOUDNESS_SMASH), "a smash must carry {dist} blocks");
     }
 
@@ -1514,7 +1595,11 @@ mod tests {
             "should have seen the player: {:?}",
             m.state
         );
-        assert!(m.pos.x > 2.0, "should have closed the distance: {:?}", m.pos);
+        assert!(
+            m.pos.x > 2.0,
+            "should have closed the distance: {:?}",
+            m.pos
+        );
     }
 
     #[test]
@@ -1549,7 +1634,15 @@ mod tests {
         let events = run(&mut mgr, &mut w, &mut sound, &player, 5.0);
         let hits: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, MobEvent::PlayerDamaged { source: MobKind::Zombie, .. }))
+            .filter(|e| {
+                matches!(
+                    e,
+                    MobEvent::PlayerDamaged {
+                        source: MobKind::Zombie,
+                        ..
+                    }
+                )
+            })
             .collect();
         let expected = (5.0 / ZOMBIE_STATS.attack_cooldown) as usize;
         assert!(
@@ -1587,9 +1680,13 @@ mod tests {
         assert!(mgr.damage(id, 100.0, Vec3::ZERO), "should have died");
         let events = run(&mut mgr, &mut w, &mut sound, &player, DT);
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, MobEvent::Drop { kind: DropKind::Meat, .. })),
+            events.iter().any(|e| matches!(
+                e,
+                MobEvent::Drop {
+                    kind: DropKind::Meat,
+                    ..
+                }
+            )),
             "a pig must drop meat: {events:?}"
         );
         assert!(mgr.get(id).is_none());
@@ -1601,7 +1698,10 @@ mod tests {
         let id = mgr.spawn(MobKind::Zombie, stand(6.0, 0.0));
         let hit = mgr.raycast(stand(0.0, 0.0) + Vec3::Y, Vec3::X, 10.0);
         assert_eq!(hit.map(|(i, _)| i), Some(id));
-        assert!(mgr.raycast(stand(0.0, 0.0) + Vec3::Y, -Vec3::X, 10.0).is_none());
+        assert!(
+            mgr.raycast(stand(0.0, 0.0) + Vec3::Y, -Vec3::X, 10.0)
+                .is_none()
+        );
     }
 
     // ---- the creeper: where both headline mechanics meet ----
@@ -1613,7 +1713,10 @@ mod tests {
         let report = explode(&mut w, centre, EXPLOSION_RADIUS);
 
         // The centre block is gone entirely.
-        assert!(w.block_at(8, 64, 8).is_air(), "the centre block must be destroyed");
+        assert!(
+            w.block_at(8, 64, 8).is_air(),
+            "the centre block must be destroyed"
+        );
         assert_eq!(w.fill_ratio(8, 64, 8), 0.0);
 
         // There is a rim of blocks that survived but are chewed.
@@ -1632,9 +1735,18 @@ mod tests {
                 }
             }
         }
-        assert!(destroyed > 20, "the blast should hollow out a core, got {destroyed}");
-        assert!(damaged > 20, "the rim must be damaged, not deleted, got {damaged}");
-        assert_eq!(destroyed, report.blocks_destroyed, "report should match the world");
+        assert!(
+            destroyed > 20,
+            "the blast should hollow out a core, got {destroyed}"
+        );
+        assert!(
+            damaged > 20,
+            "the rim must be damaged, not deleted, got {damaged}"
+        );
+        assert_eq!(
+            destroyed, report.blocks_destroyed,
+            "report should match the world"
+        );
         assert_eq!(damaged, report.blocks_damaged);
 
         // Well outside the blast nothing is touched at all.
@@ -1668,23 +1780,39 @@ mod tests {
 
         // One tick to spot the player and start fusing.
         run(&mut mgr, &mut w, &mut sound, &player, 0.2);
-        assert_eq!(mgr.get(id).unwrap().state, MobState::Fuse, "should be priming");
+        assert_eq!(
+            mgr.get(id).unwrap().state,
+            MobState::Fuse,
+            "should be priming"
+        );
         assert!(mgr.get(id).unwrap().fuse_fraction() > 0.0);
 
         let events = run(&mut mgr, &mut w, &mut sound, &player, FUSE_TIME + 0.3);
         assert!(
-            events.iter().any(|e| matches!(e, MobEvent::Exploded { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, MobEvent::Exploded { .. })),
             "the fuse must run out: {events:?}"
         );
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, MobEvent::PlayerDamaged { source: MobKind::Creeper, .. })),
+            events.iter().any(|e| matches!(
+                e,
+                MobEvent::PlayerDamaged {
+                    source: MobKind::Creeper,
+                    ..
+                }
+            )),
             "the blast must hurt a player standing next to it"
         );
-        assert!(mgr.get(id).is_none(), "the creeper is consumed by its own blast");
+        assert!(
+            mgr.get(id).is_none(),
+            "the creeper is consumed by its own blast"
+        );
         // And it left a hole in the floor.
-        assert!(w.fill_ratio(0, GROUND, 0) < 1.0, "the ground under it should be cratered");
+        assert!(
+            w.fill_ratio(0, GROUND, 0) < 1.0,
+            "the ground under it should be cratered"
+        );
     }
 
     #[test]
@@ -1700,7 +1828,11 @@ mod tests {
 
         let far = PlayerState::new(stand(30.0, 0.0), 1.62);
         run(&mut mgr, &mut w, &mut sound, &far, 0.2);
-        assert_ne!(mgr.get(id).unwrap().state, MobState::Fuse, "should have stood down");
+        assert_ne!(
+            mgr.get(id).unwrap().state,
+            MobState::Fuse,
+            "should have stood down"
+        );
     }
 
     #[test]
@@ -1753,7 +1885,10 @@ mod tests {
         sound.emit(NoiseEvent::smash(stand(8.0, 0.0)));
 
         run(&mut mgr, &mut w, &mut sound, &player, 6.0);
-        assert!(mgr.get(id).unwrap().pos.x < 3.0, "walked through a solid wall");
+        assert!(
+            mgr.get(id).unwrap().pos.x < 3.0,
+            "walked through a solid wall"
+        );
     }
 
     #[test]
@@ -1772,7 +1907,10 @@ mod tests {
             "cap broken: {} mobs",
             mgr.hostile_count()
         );
-        assert!(mgr.hostile_count() > 0, "should have spawned something in the dark");
+        assert!(
+            mgr.hostile_count() > 0,
+            "should have spawned something in the dark"
+        );
     }
 
     #[test]
@@ -1824,10 +1962,19 @@ mod tests {
     #[test]
     fn is_dark_distinguishes_a_cave_from_a_meadow() {
         let mut w = flat();
-        assert!(!is_dark(&w, IVec3::new(0, GROUND + 1, 0), 1.0), "a sunlit meadow is not dark");
-        assert!(is_dark(&w, IVec3::new(0, GROUND + 1, 0), 0.0), "the same meadow at night is");
+        assert!(
+            !is_dark(&w, IVec3::new(0, GROUND + 1, 0), 1.0),
+            "a sunlit meadow is not dark"
+        );
+        assert!(
+            is_dark(&w, IVec3::new(0, GROUND + 1, 0), 0.0),
+            "the same meadow at night is"
+        );
         w.fill((-2, GROUND + 5, -2), (2, GROUND + 6, 2), BlockId::STONE);
-        assert!(is_dark(&w, IVec3::new(0, GROUND + 1, 0), 1.0), "a roof makes it dark at noon");
+        assert!(
+            is_dark(&w, IVec3::new(0, GROUND + 1, 0), 1.0),
+            "a roof makes it dark at noon"
+        );
     }
 
     #[test]

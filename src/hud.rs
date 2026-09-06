@@ -354,10 +354,26 @@ impl Batch {
         }
         let (x0, y0, x1, y1) = (x, y, x + w, y + h);
         let (u0, v0, u1, v1) = (uv[0], uv[1], uv[2], uv[3]);
-        let tl = HudVertex { pos: [x0, y0], uv: [u0, v0], color };
-        let tr = HudVertex { pos: [x1, y0], uv: [u1, v0], color };
-        let br = HudVertex { pos: [x1, y1], uv: [u1, v1], color };
-        let bl = HudVertex { pos: [x0, y1], uv: [u0, v1], color };
+        let tl = HudVertex {
+            pos: [x0, y0],
+            uv: [u0, v0],
+            color,
+        };
+        let tr = HudVertex {
+            pos: [x1, y0],
+            uv: [u1, v0],
+            color,
+        };
+        let br = HudVertex {
+            pos: [x1, y1],
+            uv: [u1, v1],
+            color,
+        };
+        let bl = HudVertex {
+            pos: [x0, y1],
+            uv: [u0, v1],
+            color,
+        };
         self.verts.extend_from_slice(&[tl, tr, br, tl, br, bl]);
     }
 
@@ -413,8 +429,20 @@ impl Batch {
         let th = 2.0;
         // Dark backing one pixel larger on every side, for contrast against
         // both bright sky and dark caves.
-        self.rect(cx - arm - 1.0, cy - th * 0.5 - 1.0, arm * 2.0 + 2.0, th + 2.0, C_CROSSHAIR_EDGE);
-        self.rect(cx - th * 0.5 - 1.0, cy - arm - 1.0, th + 2.0, arm * 2.0 + 2.0, C_CROSSHAIR_EDGE);
+        self.rect(
+            cx - arm - 1.0,
+            cy - th * 0.5 - 1.0,
+            arm * 2.0 + 2.0,
+            th + 2.0,
+            C_CROSSHAIR_EDGE,
+        );
+        self.rect(
+            cx - th * 0.5 - 1.0,
+            cy - arm - 1.0,
+            th + 2.0,
+            arm * 2.0 + 2.0,
+            C_CROSSHAIR_EDGE,
+        );
         self.rect(cx - arm, cy - th * 0.5, arm * 2.0, th, C_CROSSHAIR);
         self.rect(cx - th * 0.5, cy - arm, th, arm * 2.0, C_CROSSHAIR);
     }
@@ -452,13 +480,7 @@ impl Batch {
                 let ts = (size * 0.26).max(9.0);
                 let label = item.count.to_string();
                 let tw = text_width(ts, &label);
-                self.text_shadowed(
-                    x + size - 3.0 - tw,
-                    y + size - 3.0 - ts,
-                    ts,
-                    C_TEXT,
-                    &label,
-                );
+                self.text_shadowed(x + size - 3.0 - tw, y + size - 3.0 - ts, ts, C_TEXT, &label);
             }
         }
 
@@ -984,7 +1006,10 @@ mod tests {
         for (i, glyph) in FONT.iter().enumerate().skip(1) {
             assert!(glyph.iter().any(|&r| r != 0), "glyph {i} is blank");
             // Only the low five bits may be set.
-            assert!(glyph.iter().all(|&r| r < 32), "glyph {i} overflows 5 columns");
+            assert!(
+                glyph.iter().all(|&r| r < 32),
+                "glyph {i} overflows 5 columns"
+            );
         }
     }
 
@@ -1073,15 +1098,25 @@ mod tests {
         b.rect(0.0, 0.0, screen[0], screen[1], [1.0; 4]);
         let tl = to_clip(b.verts[0], screen);
         let br = to_clip(b.verts[2], screen);
-        assert!((tl[0] + 1.0).abs() < 1e-5 && (tl[1] - 1.0).abs() < 1e-5, "{tl:?}");
-        assert!((br[0] - 1.0).abs() < 1e-5 && (br[1] + 1.0).abs() < 1e-5, "{br:?}");
+        assert!(
+            (tl[0] + 1.0).abs() < 1e-5 && (tl[1] - 1.0).abs() < 1e-5,
+            "{tl:?}"
+        );
+        assert!(
+            (br[0] - 1.0).abs() < 1e-5 && (br[1] + 1.0).abs() < 1e-5,
+            "{br:?}"
+        );
     }
 
     #[test]
     fn text_emits_one_quad_per_visible_glyph() {
         let mut b = batch(800.0, 600.0);
         b.text(0.0, 0.0, 14.0, C_TEXT, "A A");
-        assert_eq!(b.verts.len(), 2 * VERTS_PER_QUAD, "spaces must not emit quads");
+        assert_eq!(
+            b.verts.len(),
+            2 * VERTS_PER_QUAD,
+            "spaces must not emit quads"
+        );
 
         b.begin(800.0, 600.0);
         b.text(0.0, 0.0, 14.0, C_TEXT, "HELLO");
@@ -1108,11 +1143,7 @@ mod tests {
         let mut b = batch(800.0, 600.0);
         let s = "XYZ 1.0";
         b.text(0.0, 0.0, 14.0, C_TEXT, s);
-        let right = b
-            .verts
-            .iter()
-            .map(|v| v.pos[0])
-            .fold(f32::MIN, f32::max);
+        let right = b.verts.iter().map(|v| v.pos[0]).fold(f32::MIN, f32::max);
         assert!((right - text_width(14.0, s)).abs() < 1e-3, "{right}");
     }
 
@@ -1137,12 +1168,26 @@ mod tests {
         b.hotbar(&slots, 3);
 
         let (hx, hy, hw, hh) = b.hotbar_bounds();
-        assert!((hx + hw * 0.5 - w * 0.5).abs() < 1.0, "hotbar is not centred");
-        assert!((hy + hh + MARGIN - h).abs() < 1.0, "hotbar is not at the bottom");
+        assert!(
+            (hx + hw * 0.5 - w * 0.5).abs() < 1.0,
+            "hotbar is not centred"
+        );
+        assert!(
+            (hy + hh + MARGIN - h).abs() < 1.0,
+            "hotbar is not at the bottom"
+        );
 
         for v in &b.verts {
-            assert!(v.pos[0] >= 0.0 && v.pos[0] <= w, "x off screen: {}", v.pos[0]);
-            assert!(v.pos[1] >= 0.0 && v.pos[1] <= h, "y off screen: {}", v.pos[1]);
+            assert!(
+                v.pos[0] >= 0.0 && v.pos[0] <= w,
+                "x off screen: {}",
+                v.pos[0]
+            );
+            assert!(
+                v.pos[1] >= 0.0 && v.pos[1] <= h,
+                "y off screen: {}",
+                v.pos[1]
+            );
         }
     }
 
@@ -1204,7 +1249,11 @@ mod tests {
         let mut b = batch(1280.0, 720.0);
         b.health(-5.0, 0.0);
         b.health(999.0, 20.0);
-        assert!(b.verts.iter().all(|v| v.pos[0].is_finite() && v.pos[1].is_finite()));
+        assert!(
+            b.verts
+                .iter()
+                .all(|v| v.pos[0].is_finite() && v.pos[1].is_finite())
+        );
     }
 
     #[test]
@@ -1232,7 +1281,10 @@ mod tests {
 
         b.begin(800.0, 600.0);
         b.panel(50.0, 60.0, 200.0, 150.0);
-        assert!(b.verts.len() > VERTS_PER_QUAD, "panel needs a background and an edge");
+        assert!(
+            b.verts.len() > VERTS_PER_QUAD,
+            "panel needs a background and an edge"
+        );
         assert_eq!(b.verts[0].pos, [50.0, 60.0]);
     }
 

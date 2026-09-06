@@ -159,7 +159,11 @@ impl Player {
 
         // Blend toward the wish velocity rather than snapping to it; the air
         // rate is much lower so a jump commits to its arc.
-        let accel = if self.on_ground { GROUND_ACCEL } else { AIR_ACCEL };
+        let accel = if self.on_ground {
+            GROUND_ACCEL
+        } else {
+            AIR_ACCEL
+        };
         let blend = (accel * dt).min(1.0);
         self.vel.x += (target.x - self.vel.x) * blend;
         self.vel.z += (target.z - self.vel.z) * blend;
@@ -188,7 +192,11 @@ impl Player {
         self.vel = Vec3::ZERO;
         self.on_ground = false;
         if dir.length_squared() > 1e-6 {
-            let speed = if input.fast { FLY_SPEED_FAST } else { FLY_SPEED };
+            let speed = if input.fast {
+                FLY_SPEED_FAST
+            } else {
+                FLY_SPEED
+            };
             self.pos += dir.normalize() * speed * dt;
         }
     }
@@ -315,7 +323,13 @@ pub struct CameraUniform {
 }
 
 impl CameraUniform {
-    pub fn new(cam: &Camera, sky_linear: [f32; 3], fog_start: f32, fog_end: f32, encode_srgb: bool) -> Self {
+    pub fn new(
+        cam: &Camera,
+        sky_linear: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        encode_srgb: bool,
+    ) -> Self {
         Self {
             view_proj: cam.view_proj().to_cols_array_2d(),
             cam_pos: cam.pos.to_array(),
@@ -381,7 +395,11 @@ mod tests {
         // land at depth 0 and one at the far plane at depth 1.
         let near = proj * glam::Vec4::new(0.0, 0.0, -Z_NEAR, 1.0);
         let far = proj * glam::Vec4::new(0.0, 0.0, -Z_FAR, 1.0);
-        assert!((near.z / near.w).abs() < 1e-4, "near mapped to {}", near.z / near.w);
+        assert!(
+            (near.z / near.w).abs() < 1e-4,
+            "near mapped to {}",
+            near.z / near.w
+        );
         assert!(
             (far.z / far.w - 1.0).abs() < 1e-4,
             "far mapped to {}",
@@ -464,7 +482,11 @@ mod tests {
             p.pos.y,
             p.pos.x
         );
-        assert!(p.pos.x > 8.5, "player did not get past the lip: x={}", p.pos.x);
+        assert!(
+            p.pos.x > 8.5,
+            "player did not get past the lip: x={}",
+            p.pos.x
+        );
     }
 
     #[test]

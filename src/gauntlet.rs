@@ -242,7 +242,10 @@ impl Harness {
     }
 
     fn fail(&mut self, what: String) {
-        println!("  FAIL [{:6.1}s during {:?}] {what}", self.elapsed, self.act);
+        println!(
+            "  FAIL [{:6.1}s during {:?}] {what}",
+            self.elapsed, self.act
+        );
         self.findings.push(Finding {
             at: self.elapsed,
             during: self.act,
@@ -635,7 +638,11 @@ mod tests {
         let mut p = ok_probe();
         p.world_idle = false;
         run(&mut h, &p, STREAM_HANG_SECONDS + 2.0);
-        assert!(h.findings.iter().any(|f| f.what.contains("still streaming")));
+        assert!(
+            h.findings
+                .iter()
+                .any(|f| f.what.contains("still streaming"))
+        );
     }
 
     #[test]
@@ -643,7 +650,11 @@ mod tests {
         let mut h = Harness::new(1, 600.0);
         let p = ok_probe();
         run(&mut h, &p, STREAM_HANG_SECONDS + 5.0);
-        assert!(!h.findings.iter().any(|f| f.what.contains("still streaming")));
+        assert!(
+            !h.findings
+                .iter()
+                .any(|f| f.what.contains("still streaming"))
+        );
     }
 
     #[test]
@@ -652,7 +663,11 @@ mod tests {
         let mut p = ok_probe();
         p.save_roundtrip = Some(false);
         h.tick(0.016, &p);
-        assert!(h.findings.iter().any(|f| f.what.contains("save round-trip")));
+        assert!(
+            h.findings
+                .iter()
+                .any(|f| f.what.contains("save round-trip"))
+        );
     }
 
     #[test]
@@ -679,11 +694,15 @@ mod tests {
         // a lie, so the harness calls it out.
         let mut h = Harness::new(1, 60.0);
         h.finish();
-        assert!(h.findings.len() >= 3, "a session that did nothing must fail");
-        assert!(h
-            .findings
-            .iter()
-            .all(|f| f.what.contains("coverage too thin")));
+        assert!(
+            h.findings.len() >= 3,
+            "a session that did nothing must fail"
+        );
+        assert!(
+            h.findings
+                .iter()
+                .all(|f| f.what.contains("coverage too thin"))
+        );
     }
 
     #[test]
@@ -826,7 +845,10 @@ mod mining_feel {
         }
         // The block directly underneath must also survive.
         let below = w.fill_ratio(target.0, target.1 - 1, target.2);
-        assert!((below - 1.0).abs() < 1.0e-6, "the block below was eaten too");
+        assert!(
+            (below - 1.0).abs() < 1.0e-6,
+            "the block below was eaten too"
+        );
     }
 
     /// An explosion is the opposite: it is supposed to span blocks.
@@ -841,7 +863,10 @@ mod mining_feel {
             .iter()
             .filter(|(dx, dz)| w.fill_ratio(4 + dx, 7, 4 + dz) < 1.0)
             .count();
-        assert!(spread > 0, "an unconfined carve should reach neighbouring blocks");
+        assert!(
+            spread > 0,
+            "an unconfined carve should reach neighbouring blocks"
+        );
     }
 
     #[test]
@@ -891,7 +916,10 @@ mod mining_feel {
                 t <= limit,
                 "{block:?} with {tool:?} takes {t:.2}s to break, over the {limit:.1}s limit"
             );
-            assert!(t > 0.05, "{block:?} broke instantly ({t:.3}s), which is its own problem");
+            assert!(
+                t > 0.05,
+                "{block:?} broke instantly ({t:.3}s), which is its own problem"
+            );
         }
     }
 }

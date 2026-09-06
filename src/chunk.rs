@@ -411,7 +411,10 @@ mod tests {
                 }
             }
         }
-        assert!(destroyed, "carving all 512 sub-voxels must destroy the block");
+        assert!(
+            destroyed,
+            "carving all 512 sub-voxels must destroy the block"
+        );
         assert_eq!(c.get(1, 2, 3), BlockId::AIR);
         assert!(!c.has_damage(), "the mask must be released when it empties");
         assert!(c.is_empty());
@@ -481,7 +484,11 @@ mod tests {
 
         c.set_sky_light(4, 5, 6, 15);
         assert_eq!(c.sky_light(4, 5, 6), 15);
-        assert_eq!(c.block_light(4, 5, 6), 14, "writing sky light touched block");
+        assert_eq!(
+            c.block_light(4, 5, 6),
+            14,
+            "writing sky light touched block"
+        );
 
         c.set_block_light(4, 5, 6, 0);
         assert_eq!(c.sky_light(4, 5, 6), 15);

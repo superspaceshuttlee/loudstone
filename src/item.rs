@@ -192,7 +192,11 @@ impl ItemId {
     /// The item form of a block, for blocks that have one.
     pub fn from_block(block: BlockId) -> Option<ItemId> {
         let id = ItemId(block.0 as u16);
-        if id.places() == Some(block) { Some(id) } else { None }
+        if id.places() == Some(block) {
+            Some(id)
+        } else {
+            None
+        }
     }
 
     /// Tool kind and tier, or `None` for anything that is not a tool.
@@ -216,7 +220,9 @@ impl ItemId {
     /// How many of this item fit in one stack. Tools are 1 unless `items.ron`
     /// says otherwise.
     pub fn max_stack(self) -> u8 {
-        registry::get().item(self).map_or(MAX_STACK, |d| d.max_stack)
+        registry::get()
+            .item(self)
+            .map_or(MAX_STACK, |d| d.max_stack)
     }
 
     /// Full durability for a tool; 0 for everything else.
@@ -253,7 +259,9 @@ impl ItemId {
     /// Flat colour for the hotbar icon. Block items borrow their block's colour
     /// and tools their tier's, unless `items.ron` gives them one of their own.
     pub fn color(self) -> [f32; 3] {
-        registry::get().item(self).map_or([1.0, 0.0, 1.0], |d| d.color)
+        registry::get()
+            .item(self)
+            .map_or([1.0, 0.0, 1.0], |d| d.color)
     }
 
     /// How many seconds of furnace burn one of this item is worth, or `None` if
@@ -363,7 +371,12 @@ mod tests {
     fn block_items_share_block_numbering() {
         for &item in ItemId::ALL {
             if let Some(block) = item.places() {
-                assert_eq!(item.0, block.0 as u16, "{} broke the numbering rule", item.name());
+                assert_eq!(
+                    item.0,
+                    block.0 as u16,
+                    "{} broke the numbering rule",
+                    item.name()
+                );
                 assert_eq!(ItemId::from_block(block), Some(item));
             }
         }
@@ -414,7 +427,10 @@ mod tests {
 
     #[test]
     fn iron_needs_stone_tier() {
-        assert!(!can_harvest(Some(ItemId::WOODEN_PICKAXE), BlockId::IRON_ORE));
+        assert!(!can_harvest(
+            Some(ItemId::WOODEN_PICKAXE),
+            BlockId::IRON_ORE
+        ));
         assert!(can_harvest(Some(ItemId::STONE_PICKAXE), BlockId::IRON_ORE));
         assert!(can_harvest(Some(ItemId::IRON_PICKAXE), BlockId::IRON_ORE));
         assert_eq!(
@@ -429,7 +445,10 @@ mod tests {
             assert!(!can_harvest(Some(ItemId::WOODEN_PICKAXE), ore));
             assert!(!can_harvest(Some(ItemId::STONE_PICKAXE), ore));
             assert!(can_harvest(Some(ItemId::IRON_PICKAXE), ore));
-            assert_eq!(mining_drop(Some(ItemId::IRON_PICKAXE), ore), ItemId::from_block(ore));
+            assert_eq!(
+                mining_drop(Some(ItemId::IRON_PICKAXE), ore),
+                ItemId::from_block(ore)
+            );
         }
     }
 
@@ -497,6 +516,9 @@ mod tests {
             mining_speed_multiplier(Some(ItemId::WOODEN_PICKAXE), BlockId::DIAMOND_ORE),
             2.0
         );
-        assert!(!can_harvest(Some(ItemId::WOODEN_PICKAXE), BlockId::DIAMOND_ORE));
+        assert!(!can_harvest(
+            Some(ItemId::WOODEN_PICKAXE),
+            BlockId::DIAMOND_ORE
+        ));
     }
 }

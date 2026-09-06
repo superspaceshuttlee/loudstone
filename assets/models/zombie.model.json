@@ -1,0 +1,23 @@
+{
+  "name": "grave_roamer",
+  "parts": [
+    {"name":"left_leg","pivot":[0,0.84,-0.17],"from":[-0.13,-0.72,-0.13],"to":[0.13,0.02,0.13],"tint":[0.40,0.50,0.62],"material":"shirt","channel":"left_leg"},
+    {"name":"left_boot","pivot":[0,0.84,-0.17],"from":[-0.10,-0.86,-0.155],"to":[0.30,-0.69,0.155],"tint":[0.24,0.29,0.33],"material":"shirt","channel":"left_boot"},
+    {"name":"right_leg","pivot":[-0.07,0.84,0.17],"from":[-0.105,-0.65,-0.105],"to":[0.105,0.02,0.105],"tint":[0.40,0.50,0.62],"material":"shirt","channel":"right_leg"},
+    {"name":"right_boot","pivot":[-0.07,0.84,0.17],"from":[-0.10,-0.79,-0.13],"to":[0.30,-0.62,0.13],"tint":[0.24,0.29,0.33],"material":"shirt","channel":"right_boot"},
+    {"name":"pelvis","pivot":[0,0.76,0],"from":[-0.17,0,-0.27],"to":[0.17,0.28,0.27],"bend":-0.04,"tint":[0.40,0.50,0.62],"material":"shirt"},
+    {"name":"torso","pivot":[0,0.94,0],"from":[-0.25,0,-0.39],"to":[0.18,0.58,0.39],"bend":-0.22,"tint":[0.76,0.86,0.94],"material":"shirt"},
+    {"name":"raised_shoulder","pivot":[-0.03,1.43,-0.40],"from":[-0.20,-0.15,-0.18],"to":[0.18,0.20,0.18],"bend":-0.20,"tint":[0.76,0.86,0.94],"material":"shirt"},
+    {"name":"bare_shoulder","pivot":[-0.10,1.31,0.38],"from":[-0.13,-0.08,-0.11],"to":[0.13,0.12,0.11],"bend":0.28,"tint":[0.72,0.86,0.66],"material":"skin"},
+    {"name":"left_arm","pivot":[0.01,1.42,-0.43],"from":[-0.16,-0.74,-0.16],"to":[0.16,0.02,0.16],"tint":[0.86,0.96,0.82],"material":"skin","channel":"left_arm"},
+    {"name":"left_hand","pivot":[0.01,1.42,-0.43],"from":[-0.185,-0.91,-0.185],"to":[0.185,-0.70,0.185],"tint":[0.72,0.86,0.66],"material":"skin","channel":"left_hand"},
+    {"name":"right_arm","pivot":[0.01,1.23,0.43],"from":[-0.105,-0.93,-0.105],"to":[0.105,0.02,0.105],"tint":[0.72,0.86,0.66],"material":"skin","channel":"right_arm"},
+    {"name":"right_hand","pivot":[0.01,1.23,0.43],"from":[-0.13,-1.10,-0.13],"to":[0.13,-0.89,0.13],"tint":[0.72,0.86,0.66],"material":"skin","channel":"right_hand"},
+    {"name":"shoulder_growth_large","pivot":[-0.12,1.55,-0.40],"from":[-0.14,-0.14,-0.14],"to":[0.14,0.14,0.14],"bend":-0.18,"tint":[0.24,0.29,0.33],"material":"skin"},
+    {"name":"shoulder_growth_high","pivot":[-0.18,1.68,-0.34],"from":[-0.105,-0.105,-0.105],"to":[0.105,0.105,0.105],"bend":-0.18,"tint":[0.24,0.29,0.33],"material":"skin"},
+    {"name":"shoulder_growth_side","pivot":[-0.20,1.50,-0.53],"from":[-0.085,-0.085,-0.085],"to":[0.085,0.085,0.085],"bend":-0.18,"tint":[0.24,0.29,0.33],"material":"skin"},
+    {"name":"head","pivot":[0.16,1.47,-0.07],"from":[-0.24,0,-0.25],"to":[0.29,0.43,0.25],"bend":-0.17,"tint":[0.86,0.96,0.82],"material":"skin","front":"face","channel":"head"},
+    {"name":"jaw","pivot":[0.16,1.47,-0.07],"from":[0.23,-0.02,-0.20],"to":[0.43,0.17,0.18],"bend":-0.12,"tint":[0.72,0.86,0.66],"material":"skin"},
+    {"name":"scalp_ridge","pivot":[0.16,1.47,-0.07],"from":[-0.16,0.39,-0.22],"to":[0.10,0.51,0.02],"bend":-0.17,"tint":[0.24,0.29,0.33],"material":"skin"}
+  ]
+}

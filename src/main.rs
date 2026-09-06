@@ -20,6 +20,7 @@ mod item;
 mod light;
 mod mesh;
 mod mob;
+mod model;
 mod pathfind;
 mod save;
 mod screenshot;
@@ -38,11 +39,13 @@ use inventory::ItemStack;
 use item::ItemId;
 use mob::{MobEvent, MobKind, MobManager, PlayerState};
 use sound::SoundField;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
@@ -116,11 +119,49 @@ fn sky_for(daylight: f32) -> [f32; 3] {
     out
 }
 
+/// A hunched, asymmetrical grave-roamer built from articulated low-poly parts.
+/// It deliberately avoids the familiar square-shirt humanoid silhouette: the
+/// shoulders are uneven, the jaw projects, and its long arms lead its gait.
+fn append_zombie_model(
+    verts: &mut Vec<mesh::Vertex>,
+    indices: &mut Vec<u32>,
+    zombie: &mob::Mob,
+    time: f32,
+) {
+    let speed = Vec3::new(zombie.vel.x, 0.0, zombie.vel.z).length();
+    let motion = (speed * 0.9).clamp(0.08, 1.0);
+    let phase = time * (4.5 + speed * 1.8) + zombie.id as f32 * 1.73;
+    let stride = phase.sin() * 0.34 * motion;
+    let bob = (phase * 2.0).sin().abs() * 0.025 * motion;
+
+    model::append(
+        model::zombie(),
+        verts,
+        indices,
+        zombie.pos + Vec3::Y * bob,
+        zombie.yaw,
+        |channel| model::PartPose {
+            bend: match channel {
+                Some("left_leg") => stride,
+                Some("left_boot") => stride * 0.8,
+                Some("right_leg") => -stride * 0.72,
+                Some("right_boot") => -stride * 0.58,
+                Some("left_arm") | Some("left_hand") => 0.82 - stride * 0.45,
+                Some("right_arm") | Some("right_hand") => 0.36 + stride * 0.28,
+                Some("head") => phase.sin() * 0.025,
+                _ => 0.0,
+            },
+            offset: Vec3::ZERO,
+        },
+    );
+}
 // ---------------------------------------------------------------------------
 
 /// Which on-screen panel has focus. The cursor is only released for a panel.
 #[derive(PartialEq, Copy, Clone)]
 enum Ui {
+    /// Startup menu shown before simulation begins.
+    Title,
     Playing,
     /// The player's own 2x2 grid.
     Inventory,
@@ -132,7 +173,7 @@ enum Ui {
 
 impl Ui {
     fn is_panel(self) -> bool {
-        self != Ui::Playing
+        matches!(self, Ui::Inventory | Ui::Table | Ui::Furnace(_))
     }
     /// How many crafting cells this panel exposes. Tools are 3x3 recipes, so a
     /// 2x2 grid can only ever make planks, sticks, torches and the table itself.
@@ -140,6 +181,96 @@ impl Ui {
         match self {
             Ui::Table => 9,
             _ => 4,
+        }
+    }
+}
+
+/// Gives simulation systems the same world view as `World` while making every
+/// mutation durable. Mobs use this adapter because creeper blasts happen below
+/// the app layer, where a later event cannot reconstruct the exact ragged mask.
+struct TrackedWorld<'a> {
+    world: &'a mut World,
+    edits: &'a mut save::ChangeTracker,
+}
+
+impl TrackedWorld<'_> {
+    fn resident(&self, x: i32, y: i32, z: i32) -> bool {
+        self.world.chunks.contains_key(&ChunkPos::new(
+            x.div_euclid(CHUNK_SIZE_I),
+            y.div_euclid(CHUNK_SIZE_I),
+            z.div_euclid(CHUNK_SIZE_I),
+        ))
+    }
+}
+
+impl sound::VoxelWorld for TrackedWorld<'_> {
+    fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId {
+        self.world.block_at(x, y, z)
+    }
+
+    fn sub_solid(&self, x: i32, y: i32, z: i32, sx: usize, sy: usize, sz: usize) -> bool {
+        self.world.sub_solid(x, y, z, sx, sy, sz)
+    }
+
+    fn fill_ratio(&self, x: i32, y: i32, z: i32) -> f32 {
+        self.world.fill_ratio(x, y, z)
+    }
+
+    fn carve(&mut self, x: i32, y: i32, z: i32, sx: usize, sy: usize, sz: usize) -> bool {
+        let changed = self.resident(x, y, z) && self.world.sub_solid(x, y, z, sx, sy, sz);
+        let destroyed = self.world.carve(x, y, z, sx, sy, sz);
+        if changed {
+            self.edits.note_carve(x, y, z, sx, sy, sz);
+        }
+        destroyed
+    }
+
+    fn set_block(&mut self, x: i32, y: i32, z: i32, id: BlockId) {
+        if self.resident(x, y, z) {
+            self.world.set_block(x, y, z, id);
+            self.edits.note_set_block(x, y, z, id);
+        }
+    }
+}
+
+fn restore_mobs(data: &save::SaveData, mobs: &mut MobManager) {
+    for saved in &data.mobs {
+        saved.spawn_into(mobs);
+    }
+}
+
+fn restore_furnaces(data: &save::SaveData) -> HashMap<save::BlockPos, crafting::Furnace> {
+    data.containers
+        .iter()
+        .filter_map(|(&pos, saved)| saved.to_furnace().map(|furnace| (pos, furnace)))
+        .collect()
+}
+
+fn capture_live_state(
+    data: &mut save::SaveData,
+    mobs: &MobManager,
+    furnaces: &HashMap<save::BlockPos, crafting::Furnace>,
+    player_pos: Vec3,
+) {
+    data.capture_mobs(mobs.mobs(), player_pos);
+    // Preserve unknown future container kinds, while replacing every furnace
+    // record with the current simulation state.
+    data.containers
+        .retain(|_, container| container.kind != save::ContainerKind::FURNACE);
+    for (&pos, furnace) in furnaces {
+        data.set_container(pos, save::ContainerSave::from_furnace(furnace));
+    }
+}
+
+fn replay_arrived_chunks(
+    data: &mut save::SaveData,
+    world: &mut World,
+    replayed: &mut HashSet<ChunkPos>,
+    arrived: &[ChunkPos],
+) {
+    for &pos in arrived {
+        if replayed.insert(pos) {
+            data.edits.replay_chunk((pos.x, pos.y, pos.z), world);
         }
     }
 }
@@ -164,6 +295,7 @@ struct App {
     /// Seed, player record, inventory and the durable edit log. This IS the save.
     data: save::SaveData,
     save_path: std::path::PathBuf,
+    has_save: bool,
     time_since_save: f32,
 
     /// Chunks whose saved edits have already been replayed since becoming
@@ -174,7 +306,7 @@ struct App {
     craft_grid: [Option<ItemStack>; 9],
     /// Furnace contents, keyed by the block they belong to, so two furnaces do
     /// not share one inventory.
-    furnaces: std::collections::HashMap<(i32, i32, i32), crafting::Furnace>,
+    furnaces: HashMap<(i32, i32, i32), crafting::Furnace>,
     /// The stack held by the cursor in the inventory screen.
     carried: Option<ItemStack>,
     cursor: (f32, f32),
@@ -196,6 +328,8 @@ struct App {
     demo: bool,
     /// `--ui table` / `--ui furnace`: open that panel before capturing.
     ui_demo: Option<String>,
+    /// `--model zombie`: stage one model close to the camera for visual QA.
+    model_demo: Option<String>,
     /// `--gauntlet`: a robot plays the game and reports what broke.
     gauntlet: Option<gauntlet::Harness>,
     /// Block ids mined and placed this frame, for coverage tracking.
@@ -229,20 +363,28 @@ struct App {
 impl App {
     fn new() -> Self {
         let save_path = save::default_save_path();
-        let data = if save::save_exists(&save_path) {
+        let (data, has_save) = if save::save_exists(&save_path) {
             match save::load_from_file(&save_path) {
                 Ok(d) => {
                     println!("[loudstone] loaded save (seed {})", d.seed);
-                    d
+                    (d, true)
                 }
                 Err(e) => {
                     eprintln!("[loudstone] could not load save: {e} -- starting fresh");
-                    save::SaveData::new(1337)
+                    (save::SaveData::new(1337), false)
                 }
             }
         } else {
-            save::SaveData::new(1337)
+            (save::SaveData::new(1337), false)
         };
+
+        let automated = std::env::args().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--shot" | "--demo" | "--ui" | "--model" | "--gauntlet"
+            )
+        });
+        let force_title = std::env::args().any(|arg| arg == "--title");
 
         let world = World::new(data.seed);
         let ground = world.surface_y(0, 0) as f32 + 1.0;
@@ -260,6 +402,10 @@ impl App {
         let mut player = Player::new(start_pos);
         player.noclip = false;
 
+        let mut mobs = MobManager::new(data.seed as u64 ^ 0x9E37_79B9);
+        restore_mobs(&data, &mut mobs);
+        let furnaces = restore_furnaces(&data);
+
         Self {
             window: None,
             gfx: None,
@@ -267,18 +413,23 @@ impl App {
             camera,
             player,
             input: MoveInput::default(),
-            mobs: MobManager::new(data.seed as u64 ^ 0x9E37_79B9),
+            mobs,
             sound: SoundField::new(),
             audio: audio::Audio::new(),
             was_on_ground: false,
             step_accum: 0.0,
             data,
             save_path,
+            has_save,
             time_since_save: 0.0,
             replayed: HashSet::new(),
-            ui: Ui::Playing,
+            ui: if automated && !force_title {
+                Ui::Playing
+            } else {
+                Ui::Title
+            },
             craft_grid: [None; 9],
-            furnaces: std::collections::HashMap::new(),
+            furnaces,
             carried: None,
             cursor: (0.0, 0.0),
             cursor_locked: false,
@@ -294,9 +445,8 @@ impl App {
                 .nth(1)
                 .map(std::path::PathBuf::from),
             demo: std::env::args().any(|a| a == "--demo"),
-            ui_demo: std::env::args()
-                .skip_while(|a| a != "--ui")
-                .nth(1),
+            ui_demo: std::env::args().skip_while(|a| a != "--ui").nth(1),
+            model_demo: std::env::args().skip_while(|a| a != "--model").nth(1),
             gauntlet: std::env::args().any(|a| a == "--gauntlet").then(|| {
                 let arg = |name: &str| {
                     std::env::args()
@@ -312,7 +462,9 @@ impl App {
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0x5EED)
                 });
-                let secs = arg("--secs").map(|v| v as f32).unwrap_or(gauntlet::DEFAULT_SECONDS);
+                let secs = arg("--secs")
+                    .map(|v| v as f32)
+                    .unwrap_or(gauntlet::DEFAULT_SECONDS);
                 println!("[gauntlet] seed {seed}, {secs:.0}s session");
                 gauntlet::Harness::new(seed, secs)
             }),
@@ -368,10 +520,54 @@ impl App {
         self.data.player.pos = self.player.pos;
         self.data.player.yaw = self.camera.yaw;
         self.data.player.pitch = self.camera.pitch;
+        capture_live_state(&mut self.data, &self.mobs, &self.furnaces, self.player.pos);
         match save::save_to_file(&self.save_path, &self.data) {
-            Ok(()) => self.time_since_save = 0.0,
+            Ok(()) => {
+                self.time_since_save = 0.0;
+                self.has_save = true;
+            }
             Err(e) => eprintln!("[loudstone] save failed: {e}"),
         }
+    }
+
+    fn enter_world(&mut self) {
+        self.ui = Ui::Playing;
+        self.loading = true;
+        self.load_frames = 0;
+        self.last_frame = Instant::now();
+        self.start = Instant::now();
+        self.set_cursor_locked(true);
+    }
+
+    fn start_new_world(&mut self) {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u32)
+            .unwrap_or(1337);
+        let world = World::new(seed);
+        let ground = world.surface_y(0, 0) as f32 + 1.0;
+        let spawn = Vec3::new(0.5, ground, 0.5);
+        let aspect = self.camera.aspect;
+
+        self.data = save::SaveData::new(seed);
+        self.world = world;
+        self.spawn = spawn;
+        self.player = Player::new(spawn);
+        self.camera = Camera::new(spawn + Vec3::Y * PLAYER_EYE_HEIGHT);
+        self.camera.aspect = aspect;
+        self.mobs = MobManager::new(seed as u64 ^ 0x9E37_79B9);
+        self.sound = SoundField::new();
+        self.furnaces.clear();
+        self.replayed.clear();
+        self.craft_grid.fill(None);
+        self.carried = None;
+        self.input = MoveInput::default();
+        self.mining = false;
+        self.placing = false;
+        self.mining_target = None;
+        self.time_of_day = 0.0;
+        self.save_now();
+        self.enter_world();
     }
 
     /// Mining, placing, and the noise both of them make.
@@ -406,7 +602,11 @@ impl App {
                         + Vec3::Y * KNOCKBACK_LIFT;
                     let killed = self.mobs.damage(id, damage, knock);
                     self.audio.play(
-                        if killed { audio::Sound::MobDeath } else { audio::Sound::MobHurt },
+                        if killed {
+                            audio::Sound::MobDeath
+                        } else {
+                            audio::Sound::MobHurt
+                        },
                         audio::PlayOpts::at(mob_pos, eye),
                     );
                     self.data.inventory.damage_selected(1);
@@ -512,7 +712,9 @@ impl App {
             let Some(stack) = self.data.inventory.selected_stack() else {
                 return;
             };
-            let Some(id) = stack.item.places() else { return };
+            let Some(id) = stack.item.places() else {
+                return;
+            };
             let (px, py, pz) = hit.adjacent();
             let (min, max) = self.player.aabb();
             if self.world.place_block(px, py, pz, id, min, max) {
@@ -535,17 +737,27 @@ impl App {
 
     /// Leave whatever panel is open, returning everything on the cursor and in
     /// the crafting grid to the inventory. Closing a menu must never eat items.
-    fn close_panel(&mut self) {
-        if let Some(st) = self.carried.take() {
-            self.data.inventory.add_item(st.item, st.count as u32);
-        }
-        for cell in self.craft_grid.iter_mut() {
-            if let Some(st) = cell.take() {
-                self.data.inventory.add_item(st.item, st.count as u32);
-            }
+    fn close_panel(&mut self) -> bool {
+        let returned = match self.ui {
+            Ui::Furnace(key) => return_panel_items(
+                &mut self.data.inventory,
+                &mut self.carried,
+                &mut self.craft_grid,
+                self.furnaces.get_mut(&key),
+            ),
+            _ => return_panel_items(
+                &mut self.data.inventory,
+                &mut self.carried,
+                &mut self.craft_grid,
+                None,
+            ),
+        };
+        if !returned {
+            return false;
         }
         self.ui = Ui::Playing;
         self.set_cursor_locked(true);
+        true
     }
 
     /// Stage the two headline mechanics in front of the camera so a single
@@ -596,6 +808,25 @@ impl App {
             self.mobs.spawn(*kind, Vec3::new(p.x, y, p.z));
         }
         println!("[loudstone] demo: crater carved, 4 mobs spawned");
+    }
+
+    fn run_model_demo(&mut self, which: &str) {
+        if which != "zombie" {
+            eprintln!("[loudstone] unknown model preview: {which}");
+            return;
+        }
+        self.mobs.clear();
+        let x = self.player.pos.x.floor() as i32 + 5;
+        let z = self.player.pos.z.floor() as i32;
+        let y = self.world.surface_y(x, z) as f32 + 1.0;
+        let target = Vec3::new(x as f32 + 0.5, y, z as f32 + 0.5);
+        self.mobs.spawn(MobKind::Zombie, target);
+        self.camera.pos = target + Vec3::new(3.7, 1.18, 2.2);
+        let look = target + Vec3::Y * 1.12 - self.camera.pos;
+        self.camera.yaw = look.z.atan2(look.x);
+        self.camera.pitch = look.y.atan2(Vec3::new(look.x, 0.0, look.z).length());
+        self.player.pos = self.camera.pos - Vec3::Y * PLAYER_EYE_HEIGHT;
+        self.player.noclip = true;
     }
 
     /// Sample the game, hand the harness a probe, and carry out what it decides.
@@ -660,13 +891,16 @@ impl App {
                 .terrain
                 .biome_at(self.player.pos.x as i32, self.player.pos.z as i32)
                 as u8,
-            light_here: self
-                .world
-                .light_at(eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32),
+            light_here: self.world.light_at(
+                eye.x.floor() as i32,
+                eye.y.floor() as i32,
+                eye.z.floor() as i32,
+            ),
             inventory_total,
             inventory_bad,
             world_idle: self.world.is_idle(),
             panel: match self.ui {
+                Ui::Title => 0,
                 Ui::Playing => 0,
                 Ui::Inventory => 1,
                 Ui::Table => 2,
@@ -708,7 +942,9 @@ impl App {
         }
         match frame.set_inventory {
             Some(true) if self.ui == Ui::Playing => self.ui = Ui::Inventory,
-            Some(false) if self.ui.is_panel() => self.close_panel(),
+            Some(false) if self.ui.is_panel() => {
+                self.close_panel();
+            }
             _ => {}
         }
         if frame.attack {
@@ -734,32 +970,35 @@ impl App {
             self.player.vel = Vec3::ZERO;
             self.camera.pos = self.player.eye();
 
-        // Footsteps are driven by distance covered, not by a timer, so walking
-        // and sprinting sound different without any extra bookkeeping.
-        let ground_block = {
-            let f = self.player.pos;
-            self.world
-                .block_at(f.x.floor() as i32, (f.y - 0.2).floor() as i32, f.z.floor() as i32)
-        };
-        if self.player.on_ground {
-            let moved = Vec3::new(self.player.vel.x, 0.0, self.player.vel.z).length() * dt;
-            self.step_accum += moved;
-            if self.step_accum > 2.2 && !ground_block.is_air() {
-                self.step_accum = 0.0;
-                self.audio.play(
-                    audio::Sound::Footstep(ground_block),
-                    audio::PlayOpts::at(self.player.pos, self.camera.pos),
-                );
+            // Footsteps are driven by distance covered, not by a timer, so walking
+            // and sprinting sound different without any extra bookkeeping.
+            let ground_block = {
+                let f = self.player.pos;
+                self.world.block_at(
+                    f.x.floor() as i32,
+                    (f.y - 0.2).floor() as i32,
+                    f.z.floor() as i32,
+                )
+            };
+            if self.player.on_ground {
+                let moved = Vec3::new(self.player.vel.x, 0.0, self.player.vel.z).length() * dt;
+                self.step_accum += moved;
+                if self.step_accum > 2.2 && !ground_block.is_air() {
+                    self.step_accum = 0.0;
+                    self.audio.play(
+                        audio::Sound::Footstep(ground_block),
+                        audio::PlayOpts::at(self.player.pos, self.camera.pos),
+                    );
+                }
+                if !self.was_on_ground && !ground_block.is_air() {
+                    // Landing: one firmer step.
+                    self.audio.play(
+                        audio::Sound::Footstep(ground_block),
+                        audio::PlayOpts::at(self.player.pos, self.camera.pos).with_volume(1.5),
+                    );
+                }
             }
-            if !self.was_on_ground && !ground_block.is_air() {
-                // Landing: one firmer step.
-                self.audio.play(
-                    audio::Sound::Footstep(ground_block),
-                    audio::PlayOpts::at(self.player.pos, self.camera.pos).with_volume(1.5),
-                );
-            }
-        }
-        self.was_on_ground = self.player.on_ground;
+            self.was_on_ground = self.player.on_ground;
             self.player.unstick(&self.world);
         }
         if frame.save_check {
@@ -780,6 +1019,7 @@ impl App {
     /// game -- a save that silently loses edits looks perfect until you reload.
     fn check_save_roundtrip(&mut self) -> bool {
         self.data.player.pos = self.player.pos;
+        capture_live_state(&mut self.data, &self.mobs, &self.furnaces, self.player.pos);
         let path = std::env::temp_dir().join("loudstone_gauntlet_roundtrip.lsw");
         if save::save_to_file(&path, &self.data).is_err() {
             return false;
@@ -788,9 +1028,10 @@ impl App {
             Ok(back) => {
                 let mut same = back.seed == self.data.seed
                     && back.player.pos == self.data.player.pos
-                    && back.edits.modified_chunk_count()
-                        == self.data.edits.modified_chunk_count()
-                    && back.inventory.slots() == self.data.inventory.slots();
+                    && back.edits.modified_chunk_count() == self.data.edits.modified_chunk_count()
+                    && back.inventory.slots() == self.data.inventory.slots()
+                    && back.mobs == self.data.mobs
+                    && back.containers == self.data.containers;
                 // Every recorded block edit must come back identical. Counting
                 // chunks alone would not notice a delta that loaded empty.
                 for (key, _) in self.data.edits.chunks() {
@@ -906,8 +1147,9 @@ impl App {
         self.world.set_daylight(daylight);
 
         // --- movement, then the camera rides the player's eyes ---
-        if self.ui == Ui::Playing {
-            self.player.update(&self.world, &self.camera, &self.input, dt);
+        if self.ui == Ui::Playing && self.model_demo.is_none() {
+            self.player
+                .update(&self.world, &self.camera, &self.input, dt);
         }
         self.camera.pos = self.player.eye();
 
@@ -920,20 +1162,20 @@ impl App {
         // A freshly generated chunk knows nothing about what the player built
         // there, so saved edits are replayed the first time it becomes visible.
         let arrived: Vec<ChunkPos> = stream
-            .ready
+            .arrived
             .iter()
-            .map(|m| m.pos)
+            .copied()
             .filter(|p| !self.replayed.contains(p))
             .collect();
         if let Some(gfx) = self.gfx.as_mut() {
             gfx.apply_stream(&stream.dropped, stream.ready);
         }
-        for pos in arrived {
-            self.replayed.insert(pos);
-            let edits = std::mem::take(&mut self.data.edits);
-            edits.replay_chunk((pos.x, pos.y, pos.z), &mut self.world);
-            self.data.edits = edits;
-        }
+        replay_arrived_chunks(
+            &mut self.data,
+            &mut self.world,
+            &mut self.replayed,
+            &arrived,
+        );
 
         if self.loading {
             self.load_frames += 1;
@@ -976,16 +1218,22 @@ impl App {
 
         let mut pstate = PlayerState::new(self.player.pos, PLAYER_EYE_HEIGHT);
         pstate.alive = self.data.player.health > 0.0;
-        let events = self
-            .mobs
-            .update(&mut self.world, &mut self.sound, &pstate, daylight, dt);
+        let events = {
+            let mut world = TrackedWorld {
+                world: &mut self.world,
+                edits: &mut self.data.edits,
+            };
+            self.mobs
+                .update(&mut world, &mut self.sound, &pstate, daylight, dt)
+        };
 
         let eye_now = self.camera.pos;
         for ev in events {
             match ev {
                 MobEvent::PlayerDamaged { amount, .. } => {
                     self.data.player.health -= amount;
-                    self.audio.play(audio::Sound::PlayerHurt, audio::PlayOpts::ui());
+                    self.audio
+                        .play(audio::Sound::PlayerHurt, audio::PlayOpts::ui());
                 }
                 // Mob drops (meat, bone, gunpowder) have no item counterpart:
                 // hunger and brewing are deliberately out of scope, so there is
@@ -1015,7 +1263,10 @@ impl App {
         }
 
         if self.data.player.health <= 0.0 {
-            self.audio.play(audio::Sound::PlayerHurt, audio::PlayOpts::ui().with_pitch(0.6));
+            self.audio.play(
+                audio::Sound::PlayerHurt,
+                audio::PlayOpts::ui().with_pitch(0.6),
+            );
             self.respawn();
         }
 
@@ -1026,7 +1277,9 @@ impl App {
 
         // --- autosave ---
         self.time_since_save += dt;
-        if save::should_autosave(self.time_since_save) {
+        // Panel stacks temporarily live outside SaveData. Keep the last complete
+        // save until the panel closes rather than writing an incomplete snapshot.
+        if save::should_autosave(self.time_since_save) && !self.ui.is_panel() {
             self.save_now();
         }
     }
@@ -1036,11 +1289,17 @@ impl App {
         let daylight = daylight_at(self.time_of_day);
         let sky = sky_for(daylight);
 
-        // Mob geometry: a body box and a head box per mob. Flat colours, which
-        // is all this project wants.
+        // Entity geometry is rebuilt into growable buffers each frame. The
+        // zombie is the first articulated model; the remaining creatures keep
+        // their compact placeholder geometry until their own model pass.
         let mut verts = Vec::new();
         let mut indices = Vec::new();
+        let model_time = self.start.elapsed().as_secs_f32();
         for m in self.mobs.mobs() {
+            if m.kind == MobKind::Zombie {
+                append_zombie_model(&mut verts, &mut indices, m, model_time);
+                continue;
+            }
             let size = m.kind.size();
             let half = size.x * 0.5;
             let min = Vec3::new(m.pos.x - half, m.pos.y, m.pos.z - half);
@@ -1089,6 +1348,12 @@ impl App {
         let (w, h) = (gfx.config.width as f32, gfx.config.height as f32);
         gfx.hud.begin(w, h);
 
+        if self.ui == Ui::Title {
+            draw_title_screen(gfx, self.has_save, self.cursor);
+            gfx.render(&self.camera, [0.025, 0.045, 0.075]);
+            return;
+        }
+
         // Hotbar, built from the inventory.
         let slots: Vec<Option<Slot>> = self
             .data
@@ -1097,7 +1362,7 @@ impl App {
             .iter()
             .map(|s| s.map(|st| Slot::new(st.item.color(), st.count as u16)))
             .collect();
-        if self.ui == Ui::Playing {
+        if self.ui == Ui::Playing && self.model_demo.is_none() {
             gfx.hud.hotbar(&slots, self.data.inventory.selected());
             gfx.hud.health(self.data.player.health, 20.0);
             gfx.hud.crosshair();
@@ -1109,15 +1374,21 @@ impl App {
             .selected_stack()
             .map(|s| s.item.name().to_string())
             .unwrap_or_else(|| "empty hand".to_string());
-        gfx.hud.readout(
-            self.player.pos.to_array(),
-            self.fps,
-            &format!(
-                "{held}  |  {}  |  {}",
-                if self.smash_mode { "SMASH (loud)" } else { "chip (quiet)" },
-                if daylight > 0.5 { "day" } else { "NIGHT" }
-            ),
-        );
+        if self.model_demo.is_none() {
+            gfx.hud.readout(
+                self.player.pos.to_array(),
+                self.fps,
+                &format!(
+                    "{held}  |  {}  |  {}",
+                    if self.smash_mode {
+                        "SMASH (loud)"
+                    } else {
+                        "chip (quiet)"
+                    },
+                    if daylight > 0.5 { "day" } else { "NIGHT" }
+                ),
+            );
+        }
 
         if self.loading {
             gfx.hud.text_shadowed(
@@ -1147,6 +1418,118 @@ impl App {
 
         gfx.render(&self.camera, sky);
     }
+}
+
+// --- title screen -----------------------------------------------------------
+
+const MENU_BUTTON_W: f32 = 360.0;
+const MENU_BUTTON_H: f32 = 52.0;
+const MENU_BUTTON_GAP: f32 = 14.0;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TitleAction {
+    Continue,
+    NewWorld,
+    Quit,
+}
+
+fn menu_button_rect(w: f32, h: f32, index: usize) -> (f32, f32, f32, f32) {
+    let total_h = MENU_BUTTON_H * 3.0 + MENU_BUTTON_GAP * 2.0;
+    (
+        (w - MENU_BUTTON_W) * 0.5,
+        h * 0.55 - total_h * 0.5 + index as f32 * (MENU_BUTTON_H + MENU_BUTTON_GAP),
+        MENU_BUTTON_W,
+        MENU_BUTTON_H,
+    )
+}
+
+fn point_in_rect(point: (f32, f32), rect: (f32, f32, f32, f32)) -> bool {
+    point.0 >= rect.0 && point.0 < rect.0 + rect.2 && point.1 >= rect.1 && point.1 < rect.1 + rect.3
+}
+
+fn title_action(w: f32, h: f32, cursor: (f32, f32), has_save: bool) -> Option<TitleAction> {
+    if has_save && point_in_rect(cursor, menu_button_rect(w, h, 0)) {
+        Some(TitleAction::Continue)
+    } else if point_in_rect(cursor, menu_button_rect(w, h, 1)) {
+        Some(TitleAction::NewWorld)
+    } else if point_in_rect(cursor, menu_button_rect(w, h, 2)) {
+        Some(TitleAction::Quit)
+    } else {
+        None
+    }
+}
+
+fn draw_title_screen(gfx: &mut gfx::Renderer, has_save: bool, cursor: (f32, f32)) {
+    let (w, h) = (gfx.config.width as f32, gfx.config.height as f32);
+    gfx.hud.rect(0.0, 0.0, w, h, [0.025, 0.045, 0.075, 1.0]);
+
+    let title = "LOUDSTONE";
+    let title_size = 52.0;
+    gfx.hud.text_shadowed(
+        (w - hud::text_width(title_size, title)) * 0.5,
+        h * 0.18,
+        title_size,
+        [0.93, 0.95, 0.98, 1.0],
+        title,
+    );
+    let subtitle = "A WORLD SHAPED BY SOUND";
+    gfx.hud.text(
+        (w - hud::text_width(hud::TEXT_SIZE, subtitle)) * 0.5,
+        h * 0.18 + 66.0,
+        hud::TEXT_SIZE,
+        [0.55, 0.72, 0.76, 1.0],
+        subtitle,
+    );
+
+    let actions = [
+        ("CONTINUE WORLD", has_save),
+        ("CREATE NEW WORLD", true),
+        ("QUIT GAME", true),
+    ];
+    for (index, (label, enabled)) in actions.into_iter().enumerate() {
+        let rect = menu_button_rect(w, h, index);
+        let hovered = enabled && point_in_rect(cursor, rect);
+        let fill = if !enabled {
+            [0.10, 0.12, 0.15, 0.96]
+        } else if hovered {
+            [0.22, 0.38, 0.40, 0.98]
+        } else {
+            [0.14, 0.20, 0.23, 0.98]
+        };
+        let edge = if hovered {
+            [0.78, 0.92, 0.82, 1.0]
+        } else {
+            [0.38, 0.48, 0.50, 1.0]
+        };
+        gfx.hud.rect(rect.0, rect.1, rect.2, rect.3, fill);
+        gfx.hud.border(rect.0, rect.1, rect.2, rect.3, 2.0, edge);
+        let color = if enabled {
+            [0.94, 0.96, 0.96, 1.0]
+        } else {
+            [0.42, 0.45, 0.46, 1.0]
+        };
+        let size = 18.0;
+        gfx.hud.text_shadowed(
+            rect.0 + (rect.2 - hud::text_width(size, label)) * 0.5,
+            rect.1 + (rect.3 - size) * 0.5,
+            size,
+            color,
+            label,
+        );
+    }
+
+    let save_note = if has_save {
+        "CONTINUE LOADS SAVES/WORLD.LSW"
+    } else {
+        "NO SAVED WORLD YET"
+    };
+    gfx.hud.text(
+        (w - hud::text_width(hud::TEXT_SIZE, save_note)) * 0.5,
+        h * 0.83,
+        hud::TEXT_SIZE,
+        [0.48, 0.57, 0.59, 1.0],
+        save_note,
+    );
 }
 
 // --- inventory screen geometry, shared by drawing and hit-testing ------------
@@ -1191,10 +1574,7 @@ fn craft_output_rect(w: f32, h: f32, cells: usize) -> (f32, f32) {
     let (ox, oy) = inv_origin(w, h);
     let step = SLOT_PX + SLOT_GAP;
     let side = if cells == 9 { 3 } else { 2 };
-    (
-        ox + 6.4 * step,
-        oy - (0.9 + side as f32 * 0.5) * step,
-    )
+    (ox + 6.4 * step, oy - (0.9 + side as f32 * 0.5) * step)
 }
 
 /// Furnace slots: 0 input (top), 1 fuel (below it), 2 output (to the right).
@@ -1224,7 +1604,8 @@ fn draw_panel(
     let (ox, oy) = inv_origin(w, h);
     let gw = 9.0 * SLOT_PX + 8.0 * SLOT_GAP;
     let step = SLOT_PX + SLOT_GAP;
-    gfx.hud.panel(ox - 16.0, oy - 4.8 * step, gw + 32.0, 8.2 * step + 40.0);
+    gfx.hud
+        .panel(ox - 16.0, oy - 4.8 * step, gw + 32.0, 8.2 * step + 40.0);
 
     let to_slot = |s: Option<ItemStack>| s.map(|st| Slot::new(st.item.color(), st.count as u16));
 
@@ -1285,8 +1666,13 @@ fn draw_panel(
         }
     }
 
-    gfx.hud
-        .text_shadowed(ox, oy - 4.55 * step, hud::TEXT_SIZE, [0.92, 0.92, 0.95, 1.0], title);
+    gfx.hud.text_shadowed(
+        ox,
+        oy - 4.55 * step,
+        hud::TEXT_SIZE,
+        [0.92, 0.92, 0.95, 1.0],
+        title,
+    );
 
     // The carried stack rides the cursor so it is obvious what is in hand.
     if let Some(st) = carried {
@@ -1320,10 +1706,10 @@ impl App {
                     }
                     if i == 2 {
                         // The output slot only ever gives; it never accepts.
-                        if let Some(out) = f.take_output() {
-                            let spilled = self.data.inventory.add_item(out.item, out.count as u32);
-                            if spilled > 0 {
-                                self.carried = Some(ItemStack::new(out.item, spilled as u8));
+                        let mut candidate = f.clone();
+                        if let Some(out) = candidate.take_output() {
+                            if store_output(&mut self.data.inventory, &mut self.carried, out) {
+                                f = candidate;
                             }
                         }
                     } else {
@@ -1338,10 +1724,10 @@ impl App {
             let cells = self.ui.craft_cells();
             let (cx, cy) = craft_output_rect(w, h, cells);
             if inside(cx, cy, SLOT_PX) {
-                if let Some(out) = crafting::craft(&mut self.craft_grid[..cells]) {
-                    let spilled = self.data.inventory.add_item(out.item, out.count as u32);
-                    if spilled > 0 {
-                        self.carried = Some(ItemStack::new(out.item, spilled as u8));
+                let mut candidate = self.craft_grid;
+                if let Some(out) = crafting::craft(&mut candidate[..cells]) {
+                    if store_output(&mut self.data.inventory, &mut self.carried, out) {
+                        self.craft_grid = candidate;
                     }
                 }
                 return true;
@@ -1389,16 +1775,10 @@ fn swap_carried(carried: &mut Option<ItemStack>, cell: &mut Option<ItemStack>, r
                 *cell = Some(c);
             }
         }
-        (Some(c), Some(s)) => {
-            if c.item == s.item && s.count < 64 {
-                let room = 64 - s.count;
-                let moved = room.min(c.count);
-                *cell = Some(ItemStack::new(s.item, s.count + moved));
-                *carried = if c.count > moved {
-                    Some(ItemStack::new(c.item, c.count - moved))
-                } else {
-                    None
-                };
+        (Some(c), Some(mut s)) => {
+            if s.stacks_with(c) && !s.is_full() {
+                *carried = s.merge(c);
+                *cell = Some(s);
             } else {
                 *cell = Some(c);
                 *carried = Some(s);
@@ -1406,6 +1786,73 @@ fn swap_carried(carried: &mut Option<ItemStack>, cell: &mut Option<ItemStack>, r
         }
         (None, None) => {}
     }
+}
+
+fn merge_into_cell(cell: &mut Option<ItemStack>, stack: ItemStack) -> Option<ItemStack> {
+    match cell {
+        Some(existing) => existing.merge(stack),
+        None => {
+            *cell = Some(stack);
+            None
+        }
+    }
+}
+
+/// Store an output transactionally. If neither the inventory nor the cursor can
+/// hold it, leave both untouched so crafting or furnace output is not consumed.
+fn store_output(
+    inventory: &mut inventory::Inventory,
+    carried: &mut Option<ItemStack>,
+    output: ItemStack,
+) -> bool {
+    let mut next_inventory = inventory.clone();
+    let mut next_carried = *carried;
+    if let Some(rest) = next_inventory.add(output)
+        && merge_into_cell(&mut next_carried, rest).is_some()
+    {
+        return false;
+    }
+    *inventory = next_inventory;
+    *carried = next_carried;
+    true
+}
+
+/// Return transient panel stacks without loss. A cursor stack taken from a full
+/// furnace can always fall back into one of that furnace's now-empty input slots.
+fn return_panel_items(
+    inventory: &mut inventory::Inventory,
+    carried: &mut Option<ItemStack>,
+    craft_grid: &mut [Option<ItemStack>; 9],
+    mut furnace: Option<&mut crafting::Furnace>,
+) -> bool {
+    let pending = carried
+        .iter()
+        .chain(craft_grid.iter().flatten())
+        .copied()
+        .collect::<Vec<_>>();
+    let mut next_inventory = inventory.clone();
+    let mut next_furnace = furnace.as_deref().cloned();
+
+    for stack in pending {
+        let mut rest = next_inventory.add(stack);
+        if let (Some(left), Some(target)) = (rest, next_furnace.as_mut()) {
+            rest = merge_into_cell(&mut target.input, left);
+            if let Some(left) = rest {
+                rest = merge_into_cell(&mut target.fuel, left);
+            }
+        }
+        if rest.is_some() {
+            return false;
+        }
+    }
+
+    *inventory = next_inventory;
+    if let (Some(target), Some(next)) = (furnace.as_deref_mut(), next_furnace) {
+        *target = next;
+    }
+    *carried = None;
+    craft_grid.fill(None);
+    true
 }
 
 impl ApplicationHandler for App {
@@ -1421,7 +1868,7 @@ impl ApplicationHandler for App {
         self.camera.aspect = renderer.config.width as f32 / renderer.config.height as f32;
         self.gfx = Some(renderer);
         self.window = Some(window);
-        self.set_cursor_locked(true);
+        self.set_cursor_locked(self.ui != Ui::Title);
         self.last_frame = Instant::now();
         self.start = Instant::now();
         println!(
@@ -1442,6 +1889,14 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
+                if self.ui == Ui::Title {
+                    event_loop.exit();
+                    return;
+                }
+                if self.ui.is_panel() && !self.close_panel() {
+                    eprintln!("[loudstone] cannot close while panel items have nowhere safe to go");
+                    return;
+                }
                 self.save_now();
                 event_loop.exit();
             }
@@ -1458,6 +1913,9 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.ui == Ui::Title {
+                    return;
+                }
                 let d = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -y,
                     MouseScrollDelta::PixelDelta(p) => -(p.y as f32) / 60.0,
@@ -1469,6 +1927,25 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
+                if self.ui == Ui::Title {
+                    if pressed && button == MouseButton::Left {
+                        let action = self.gfx.as_ref().and_then(|gfx| {
+                            title_action(
+                                gfx.config.width as f32,
+                                gfx.config.height as f32,
+                                self.cursor,
+                                self.has_save,
+                            )
+                        });
+                        match action {
+                            Some(TitleAction::Continue) => self.enter_world(),
+                            Some(TitleAction::NewWorld) => self.start_new_world(),
+                            Some(TitleAction::Quit) => event_loop.exit(),
+                            None => {}
+                        }
+                    }
+                    return;
+                }
                 if self.ui.is_panel() {
                     if pressed {
                         self.panel_click(button == MouseButton::Right);
@@ -1494,6 +1971,17 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    if self.ui == Ui::Title {
+                        if pressed {
+                            match code {
+                                KeyCode::Enter if self.has_save => self.enter_world(),
+                                KeyCode::Enter | KeyCode::KeyN => self.start_new_world(),
+                                KeyCode::Escape | KeyCode::KeyQ => event_loop.exit(),
+                                _ => {}
+                            }
+                        }
+                        return;
+                    }
                     match code {
                         KeyCode::KeyW => self.input.fwd = pressed,
                         KeyCode::KeyS => self.input.back = pressed,
@@ -1554,8 +2042,13 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
 
-                let gauntlet_shot = self.drive_gauntlet(dt);
-                self.update(dt);
+                let gauntlet_shot = if self.ui == Ui::Title {
+                    None
+                } else {
+                    let shot = self.drive_gauntlet(dt);
+                    self.update(dt);
+                    shot
+                };
                 if let Some(name) = gauntlet_shot {
                     if let Some(gfx) = self.gfx.as_mut() {
                         gfx.request_capture(
@@ -1573,7 +2066,9 @@ impl ApplicationHandler for App {
                     self.fps = self.fps_frames as f32 / self.fps_accum;
                     self.fps_accum = 0.0;
                     self.fps_frames = 0;
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &self.window
+                        && self.ui != Ui::Title
+                    {
                         w.set_title(&format!(
                             "Loudstone  |  {:.0} fps  |  {} chunks  |  {} mobs",
                             self.fps,
@@ -1588,7 +2083,7 @@ impl ApplicationHandler for App {
                 // `--shot <path>`: wait for the world to finish streaming, give
                 // it a few frames to settle, capture, and quit.
                 if let Some(path) = self.shot_path.clone() {
-                    if !self.loading {
+                    if self.ui == Ui::Title || !self.loading {
                         self.shot_countdown -= 1;
                         if self.shot_countdown == 60 {
                             if self.demo {
@@ -1596,6 +2091,11 @@ impl ApplicationHandler for App {
                             }
                             if let Some(which) = self.ui_demo.clone() {
                                 self.run_ui_demo(&which);
+                            }
+                        }
+                        if self.shot_countdown == 2 {
+                            if let Some(which) = self.model_demo.clone() {
+                                self.run_model_demo(&which);
                             }
                         }
                         if self.shot_countdown == 0 {
@@ -1662,6 +2162,10 @@ fn digit_row(code: KeyCode) -> Option<usize> {
 }
 
 fn main() {
+    if let Err(error) = block::registry::init() {
+        eprintln!("[loudstone] {error}");
+        eprintln!("[loudstone] falling back to the built-in content data");
+    }
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new();
@@ -1713,7 +2217,11 @@ mod tests {
     #[test]
     fn daylight_runs_a_full_cycle_from_noon_to_midnight_and_back() {
         assert_eq!(daylight_at(0.0), 1.0);
-        assert_eq!(daylight_at(DAY_LENGTH * 0.5), 1.0, "still day at half a cycle");
+        assert_eq!(
+            daylight_at(DAY_LENGTH * 0.5),
+            1.0,
+            "still day at half a cycle"
+        );
         // Deep night sits between the two twilight ramps.
         let night = DAY_LENGTH * (DAY_FRACTION + (1.0 - DAY_FRACTION) * 0.5 + 0.02);
         assert_eq!(daylight_at(night), 0.0);
@@ -1796,8 +2304,14 @@ mod tests {
         assert_eq!(pick.item, ItemId::STONE_PICKAXE);
 
         // That pickaxe is exactly what iron ore requires -- a wooden one is not.
-        assert!(item::can_harvest(Some(ItemId::STONE_PICKAXE), BlockId::IRON_ORE));
-        assert!(!item::can_harvest(Some(ItemId::WOODEN_PICKAXE), BlockId::IRON_ORE));
+        assert!(item::can_harvest(
+            Some(ItemId::STONE_PICKAXE),
+            BlockId::IRON_ORE
+        ));
+        assert!(!item::can_harvest(
+            Some(ItemId::WOODEN_PICKAXE),
+            BlockId::IRON_ORE
+        ));
         assert_eq!(
             item::mining_drop(Some(ItemId::STONE_PICKAXE), BlockId::IRON_ORE),
             Some(ItemId::RAW_IRON)
@@ -1822,8 +2336,14 @@ mod tests {
         g[7] = stack(ItemId::STICK, 1);
         let iron_pick = crafting::craft(&mut g[..9]).expect("ingots make an iron pickaxe");
         assert_eq!(iron_pick.item, ItemId::IRON_PICKAXE);
-        assert!(item::can_harvest(Some(ItemId::IRON_PICKAXE), BlockId::DIAMOND_ORE));
-        assert!(!item::can_harvest(Some(ItemId::STONE_PICKAXE), BlockId::DIAMOND_ORE));
+        assert!(item::can_harvest(
+            Some(ItemId::IRON_PICKAXE),
+            BlockId::DIAMOND_ORE
+        ));
+        assert!(!item::can_harvest(
+            Some(ItemId::STONE_PICKAXE),
+            BlockId::DIAMOND_ORE
+        ));
 
         let _ = inv.slot(0);
     }
@@ -1838,6 +2358,168 @@ mod tests {
         assert!(!f.is_burning(), "an idle furnace must not waste its fuel");
         assert_eq!(f.fuel.map(|s| s.count), Some(1));
     }
+
+    #[test]
+    fn inventory_cursor_never_merges_or_repairs_tools() {
+        let mut carried = Some(ItemStack::worn(ItemId::IRON_PICKAXE, 200));
+        let mut cell = Some(ItemStack::worn(ItemId::IRON_PICKAXE, 75));
+
+        swap_carried(&mut carried, &mut cell, false);
+
+        assert_eq!(carried, Some(ItemStack::worn(ItemId::IRON_PICKAXE, 75)));
+        assert_eq!(cell, Some(ItemStack::worn(ItemId::IRON_PICKAXE, 200)));
+    }
+
+    #[test]
+    fn inventory_cursor_uses_each_items_stack_limit() {
+        let mut carried = Some(ItemStack::new(ItemId::COBBLESTONE, 10));
+        let mut cell = Some(ItemStack::new(ItemId::COBBLESTONE, 60));
+
+        swap_carried(&mut carried, &mut cell, false);
+
+        assert_eq!(cell.map(|s| s.count), Some(ItemId::COBBLESTONE.max_stack()));
+        assert_eq!(carried.map(|s| s.count), Some(6));
+    }
+
+    #[test]
+    fn live_mobs_and_furnaces_cross_the_save_boundary() {
+        let player_pos = Vec3::new(4.0, 70.0, -3.0);
+        let mut live_mobs = MobManager::new(9);
+        live_mobs.spawning_enabled = false;
+        live_mobs.spawn(MobKind::Pig, player_pos + Vec3::X);
+
+        let furnace_pos = (8, 64, -4);
+        let mut furnace = crafting::Furnace::new();
+        furnace.input = Some(ItemStack::new(ItemId::RAW_IRON, 2));
+        furnace.fuel = Some(ItemStack::new(ItemId::COAL, 1));
+        furnace.tick(2.0);
+        let live_furnaces = std::collections::HashMap::from([(furnace_pos, furnace)]);
+
+        let mut data = save::SaveData::new(9);
+        capture_live_state(&mut data, &live_mobs, &live_furnaces, player_pos);
+        assert_eq!(data.mobs.len(), 1);
+        assert!(data.container(furnace_pos).is_some());
+
+        let mut restored_mobs = MobManager::new(9);
+        restored_mobs.spawning_enabled = false;
+        restore_mobs(&data, &mut restored_mobs);
+        let restored_furnaces = restore_furnaces(&data);
+
+        assert_eq!(restored_mobs.len(), 1);
+        assert_eq!(restored_mobs.mobs()[0].kind, MobKind::Pig);
+        assert_eq!(
+            restored_furnaces[&furnace_pos].input,
+            live_furnaces[&furnace_pos].input
+        );
+        assert_eq!(
+            restored_furnaces[&furnace_pos].progress_fraction(),
+            live_furnaces[&furnace_pos].progress_fraction()
+        );
+    }
+
+    #[test]
+    fn mob_world_mutations_are_written_to_the_durable_edit_log() {
+        let mut world = World::new(17);
+        assert!(world.ensure(ChunkPos::new(0, 4, 0)));
+        world.set_block(1, 65, 1, BlockId::STONE);
+        let mut edits = save::ChangeTracker::new();
+
+        {
+            let mut tracked = TrackedWorld {
+                world: &mut world,
+                edits: &mut edits,
+            };
+            sound::VoxelWorld::carve(&mut tracked, 1, 65, 1, 0, 0, 0);
+            sound::VoxelWorld::set_block(&mut tracked, 2, 65, 1, BlockId::AIR);
+        }
+
+        assert!(edits.mask_at(1, 65, 1).is_some());
+        assert_eq!(edits.block_at(2, 65, 1), Some(BlockId::AIR));
+    }
+
+    #[test]
+    fn an_actual_explosion_is_written_to_the_durable_edit_log() {
+        let mut world = World::new(18);
+        assert!(world.ensure(ChunkPos::new(0, 4, 0)));
+        for x in 5..=11 {
+            for y in 62..=68 {
+                for z in 5..=11 {
+                    world.set_block(x, y, z, BlockId::STONE);
+                }
+            }
+        }
+        let mut edits = save::ChangeTracker::new();
+
+        let report = {
+            let mut tracked = TrackedWorld {
+                world: &mut world,
+                edits: &mut edits,
+            };
+            mob::explode(&mut tracked, Vec3::new(8.5, 65.5, 8.5), 2.5)
+        };
+
+        assert!(report.blocks_destroyed + report.blocks_damaged > 0);
+        assert!(!edits.is_empty());
+    }
+
+    #[test]
+    fn saved_edits_replay_when_an_empty_chunk_arrives_without_a_mesh() {
+        let pos = ChunkPos::new(0, 10, 0);
+        let mut world = World::new(23);
+        world.chunks.insert(pos, Arc::new(chunk::Chunk::new(pos)));
+        let mut data = save::SaveData::new(23);
+        data.edits
+            .note_set_block(1, pos.y * CHUNK_SIZE_I + 2, 1, BlockId::PLANKS);
+        let mut replayed = HashSet::new();
+
+        replay_arrived_chunks(&mut data, &mut world, &mut replayed, &[pos]);
+
+        assert_eq!(
+            world.block_at(1, pos.y * CHUNK_SIZE_I + 2, 1),
+            BlockId::PLANKS
+        );
+        assert!(replayed.contains(&pos));
+    }
+
+    #[test]
+    fn output_collection_never_overwrites_an_incompatible_carried_stack() {
+        let mut inventory = inventory::Inventory::new();
+        for index in 0..inventory::SLOT_COUNT {
+            inventory.set_slot(index, Some(ItemStack::new(ItemId::DIRT, 64)));
+        }
+        let held = ItemStack::worn(ItemId::IRON_PICKAXE, 71);
+        let mut carried = Some(held);
+
+        assert!(!store_output(
+            &mut inventory,
+            &mut carried,
+            ItemStack::new(ItemId::IRON_INGOT, 1)
+        ));
+        assert_eq!(carried, Some(held));
+        assert_eq!(inventory.count(ItemId::IRON_INGOT), 0);
+    }
+
+    #[test]
+    fn closing_a_full_furnace_panel_returns_the_cursor_stack_to_the_furnace() {
+        let mut inventory = inventory::Inventory::new();
+        for index in 0..inventory::SLOT_COUNT {
+            inventory.set_slot(index, Some(ItemStack::new(ItemId::DIRT, 64)));
+        }
+        let coal = ItemStack::new(ItemId::COAL, 8);
+        let mut carried = Some(coal);
+        let mut grid = [None; 9];
+        let mut furnace = crafting::Furnace::new();
+
+        assert!(return_panel_items(
+            &mut inventory,
+            &mut carried,
+            &mut grid,
+            Some(&mut furnace)
+        ));
+        assert!(carried.is_none());
+        assert_eq!(furnace.input, Some(coal));
+    }
+
     #[test]
     fn a_block_can_be_placed_into_water_and_ground_cover() {
         // The gauntlet found this: standing beside a lake, every placement was

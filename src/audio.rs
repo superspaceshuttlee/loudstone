@@ -225,53 +225,123 @@ pub struct MaterialVoice {
 
 /// Rock: a bright chip with a dull thud under it.
 pub const VOICE_STONE: MaterialVoice = MaterialVoice {
-    centre: 1500.0, q: 1.2, sweep: 0.75, grain: 0.0,
-    body: 210.0, body_mix: 0.28, body_tau: 0.035, tri: false, trim: 1.00,
+    centre: 1500.0,
+    q: 1.2,
+    sweep: 0.75,
+    grain: 0.0,
+    body: 210.0,
+    body_mix: 0.28,
+    body_tau: 0.035,
+    tri: false,
+    trim: 1.00,
 };
 /// Soil: low, soft, almost no transient.
 pub const VOICE_DIRT: MaterialVoice = MaterialVoice {
-    centre: 700.0, q: 0.8, sweep: 0.65, grain: 0.0,
-    body: 120.0, body_mix: 0.30, body_tau: 0.030, tri: false, trim: 0.85,
+    centre: 700.0,
+    q: 0.8,
+    sweep: 0.65,
+    grain: 0.0,
+    body: 120.0,
+    body_mix: 0.30,
+    body_tau: 0.030,
+    tri: false,
+    trim: 0.85,
 };
 /// Sand: pure broadband hiss, no pitch at all.
 pub const VOICE_SAND: MaterialVoice = MaterialVoice {
-    centre: 3300.0, q: 0.5, sweep: 0.55, grain: 0.0,
-    body: 0.0, body_mix: 0.0, body_tau: 0.02, tri: false, trim: 0.80,
+    centre: 3300.0,
+    q: 0.5,
+    sweep: 0.55,
+    grain: 0.0,
+    body: 0.0,
+    body_mix: 0.0,
+    body_tau: 0.02,
+    tri: false,
+    trim: 0.80,
 };
 /// Gravel: sand with stones in it. The grain is what makes it rattle.
 pub const VOICE_GRAVEL: MaterialVoice = MaterialVoice {
-    centre: 2300.0, q: 1.0, sweep: 0.60, grain: 5200.0,
-    body: 180.0, body_mix: 0.16, body_tau: 0.025, tri: false, trim: 0.90,
+    centre: 2300.0,
+    q: 1.0,
+    sweep: 0.60,
+    grain: 5200.0,
+    body: 180.0,
+    body_mix: 0.16,
+    body_tau: 0.025,
+    tri: false,
+    trim: 0.90,
 };
 /// Snow: a high, dry squeak-crunch.
 pub const VOICE_SNOW: MaterialVoice = MaterialVoice {
-    centre: 4600.0, q: 0.7, sweep: 0.70, grain: 2600.0,
-    body: 0.0, body_mix: 0.0, body_tau: 0.02, tri: false, trim: 0.70,
+    centre: 4600.0,
+    q: 0.7,
+    sweep: 0.70,
+    grain: 2600.0,
+    body: 0.0,
+    body_mix: 0.0,
+    body_tau: 0.02,
+    tri: false,
+    trim: 0.70,
 };
 /// Wood: the woodiest thing here is the triangle body, not the noise.
 pub const VOICE_WOOD: MaterialVoice = MaterialVoice {
-    centre: 950.0, q: 1.7, sweep: 0.70, grain: 0.0,
-    body: 320.0, body_mix: 0.55, body_tau: 0.055, tri: true, trim: 1.00,
+    centre: 950.0,
+    q: 1.7,
+    sweep: 0.70,
+    grain: 0.0,
+    body: 320.0,
+    body_mix: 0.55,
+    body_tau: 0.055,
+    tri: true,
+    trim: 1.00,
 };
 /// Leaves: a long, quiet, high rustle with no body whatsoever.
 pub const VOICE_LEAVES: MaterialVoice = MaterialVoice {
-    centre: 5200.0, q: 0.45, sweep: 0.80, grain: 0.0,
-    body: 0.0, body_mix: 0.0, body_tau: 0.02, tri: false, trim: 0.55,
+    centre: 5200.0,
+    q: 0.45,
+    sweep: 0.80,
+    grain: 0.0,
+    body: 0.0,
+    body_mix: 0.0,
+    body_tau: 0.02,
+    tri: false,
+    trim: 0.55,
 };
 /// Ore-bearing rock: stone, plus a metallic ring that outlasts the chip.
 pub const VOICE_METAL: MaterialVoice = MaterialVoice {
-    centre: 2100.0, q: 2.6, sweep: 0.85, grain: 0.0,
-    body: 880.0, body_mix: 0.48, body_tau: 0.110, tri: false, trim: 1.00,
+    centre: 2100.0,
+    q: 2.6,
+    sweep: 0.85,
+    grain: 0.0,
+    body: 880.0,
+    body_mix: 0.48,
+    body_tau: 0.110,
+    tri: false,
+    trim: 1.00,
 };
 /// Diamond and ice: a glassy ping that rings on well past the transient.
 pub const VOICE_CRYSTAL: MaterialVoice = MaterialVoice {
-    centre: 3600.0, q: 3.4, sweep: 0.95, grain: 0.0,
-    body: 1760.0, body_mix: 0.62, body_tau: 0.190, tri: false, trim: 0.95,
+    centre: 3600.0,
+    q: 3.4,
+    sweep: 0.95,
+    grain: 0.0,
+    body: 1760.0,
+    body_mix: 0.62,
+    body_tau: 0.190,
+    tri: false,
+    trim: 0.95,
 };
 /// Water: a bloop. The body sweeps *up*, which is the whole trick.
 pub const VOICE_LIQUID: MaterialVoice = MaterialVoice {
-    centre: 1100.0, q: 0.9, sweep: 0.50, grain: 0.0,
-    body: 380.0, body_mix: 0.55, body_tau: 0.070, tri: false, trim: 0.75,
+    centre: 1100.0,
+    q: 0.9,
+    sweep: 0.50,
+    grain: 0.0,
+    body: 380.0,
+    body_mix: 0.55,
+    body_tau: 0.070,
+    tri: false,
+    trim: 0.75,
 };
 
 // ------------------------- per-action envelope shapes ------------------------
@@ -297,23 +367,39 @@ pub struct ActionShape {
 
 /// The repeating tick while mining. Short and dry above all else.
 pub const SHAPE_DIG: ActionShape = ActionShape {
-    len: 0.10, attack: 0.0015, tau: 0.022,
-    centre_scale: 1.00, body_scale: 0.60, body_tau_scale: 0.55,
+    len: 0.10,
+    attack: 0.0015,
+    tau: 0.022,
+    centre_scale: 1.00,
+    body_scale: 0.60,
+    body_tau_scale: 0.55,
 };
 /// The pop when the block finally goes. Longer, lower, fuller.
 pub const SHAPE_BREAK: ActionShape = ActionShape {
-    len: 0.38, attack: 0.0015, tau: 0.075,
-    centre_scale: 0.88, body_scale: 1.25, body_tau_scale: 1.60,
+    len: 0.38,
+    attack: 0.0015,
+    tau: 0.075,
+    centre_scale: 0.88,
+    body_scale: 1.25,
+    body_tau_scale: 1.60,
 };
 /// Setting a block down: a firm, short knock.
 pub const SHAPE_PLACE: ActionShape = ActionShape {
-    len: 0.18, attack: 0.0020, tau: 0.038,
-    centre_scale: 1.05, body_scale: 1.00, body_tau_scale: 0.80,
+    len: 0.18,
+    attack: 0.0020,
+    tau: 0.038,
+    centre_scale: 1.05,
+    body_scale: 1.00,
+    body_tau_scale: 0.80,
 };
 /// A boot landing: duller and shorter than digging the same block.
 pub const SHAPE_STEP: ActionShape = ActionShape {
-    len: 0.15, attack: 0.0030, tau: 0.032,
-    centre_scale: 0.72, body_scale: 0.85, body_tau_scale: 0.90,
+    len: 0.15,
+    attack: 0.0030,
+    tau: 0.032,
+    centre_scale: 0.72,
+    body_scale: 0.85,
+    body_tau_scale: 0.90,
 };
 
 // =============================================================================
@@ -391,7 +477,12 @@ pub struct PlayOpts {
 
 impl Default for PlayOpts {
     fn default() -> Self {
-        Self { volume: 1.0, pitch: 1.0, pos: None, listener: Vec3::ZERO }
+        Self {
+            volume: 1.0,
+            pitch: 1.0,
+            pos: None,
+            listener: Vec3::ZERO,
+        }
     }
 }
 
@@ -403,7 +494,11 @@ impl PlayOpts {
 
     /// Something that happened out in the world, heard from `listener`.
     pub fn at(pos: Vec3, listener: Vec3) -> Self {
-        Self { pos: Some(pos), listener, ..Self::default() }
+        Self {
+            pos: Some(pos),
+            listener,
+            ..Self::default()
+        }
     }
 
     /// Scale the volume. Chainable.
@@ -571,7 +666,11 @@ impl Audio {
     /// Master fader, 0.0 to about 2.0. Applied on the audio thread before the
     /// limiter, so turning it up cannot make the output clip.
     pub fn set_master_volume(&self, v: f32) {
-        let v = if v.is_finite() { v.clamp(0.0, 2.0) } else { 0.0 };
+        let v = if v.is_finite() {
+            v.clamp(0.0, 2.0)
+        } else {
+            0.0
+        };
         self.master.store(v.to_bits(), Ordering::Relaxed);
     }
 
@@ -590,8 +689,10 @@ impl Audio {
     pub fn footstep(&self, ground: BlockId, speed: f32, on_ground: bool, dt: f32) {
         if !on_ground || ground.is_air() || !speed.is_finite() || speed < FOOTSTEP_MIN_SPEED {
             // Park part-way into the stride so walking again steps promptly.
-            self.walked
-                .store((FOOTSTEP_STRIDE * FOOTSTEP_PRIME).to_bits(), Ordering::Relaxed);
+            self.walked.store(
+                (FOOTSTEP_STRIDE * FOOTSTEP_PRIME).to_bits(),
+                Ordering::Relaxed,
+            );
             return;
         }
         let mut d = f32::from_bits(self.walked.load(Ordering::Relaxed)) + speed * dt;
@@ -615,7 +716,11 @@ impl Audio {
             // their head.
             let a = unit * std::f32::consts::TAU;
             let off = Vec3::new(a.cos(), (unit - 0.5) * 0.6, a.sin()) * AMBIENCE_DISTANCE;
-            let sound = if underground { Sound::CaveDrip } else { Sound::Wind };
+            let sound = if underground {
+                Sound::CaveDrip
+            } else {
+                Sound::Wind
+            };
             self.play(sound, PlayOpts::at(listener + off, listener));
         }
         self.ambience.store(left.to_bits(), Ordering::Relaxed);
@@ -640,7 +745,11 @@ fn cooldown_ready(last_us: u64, now_us: u64, gap_s: f32) -> bool {
     if last_us == 0 {
         return true;
     }
-    let gap_us = if gap_s.is_finite() { (gap_s.max(0.0) * 1.0e6) as u64 } else { 0 };
+    let gap_us = if gap_s.is_finite() {
+        (gap_s.max(0.0) * 1.0e6) as u64
+    } else {
+        0
+    };
     now_us >= last_us.saturating_add(gap_us)
 }
 
@@ -996,7 +1105,11 @@ fn render_hit(spec: &HitSpec, sr: f32, seed: u32) -> Vec<f32> {
     let mut phase = 0.0f32;
     let mut hold = 0.0f32;
     let mut hold_left = 0.0f32;
-    let hold_period = if spec.grain > 1.0 { (sr / spec.grain).max(1.0) } else { 0.0 };
+    let hold_period = if spec.grain > 1.0 {
+        (sr / spec.grain).max(1.0)
+    } else {
+        0.0
+    };
 
     for (i, s) in out.iter_mut().enumerate() {
         let t = i as f32 / n as f32;
@@ -1206,7 +1319,11 @@ impl Bank {
     /// milliseconds and happens once, on the audio thread, before the stream
     /// starts -- never on the main thread.
     pub fn render(sr: f32) -> Bank {
-        let sr = if sr.is_finite() && sr >= 8000.0 { sr } else { 44_100.0 };
+        let sr = if sr.is_finite() && sr >= 8000.0 {
+            sr
+        } else {
+            44_100.0
+        };
         let mut slots = vec![Vec::new(); TOTAL_SLOTS];
 
         for &m in MATERIALS.iter() {
@@ -1401,7 +1518,10 @@ pub struct Mixer {
 
 impl Mixer {
     pub fn new(bank: Bank) -> Mixer {
-        Mixer { bank, voices: vec![Voice::default(); MAX_VOICES] }
+        Mixer {
+            bank,
+            voices: vec![Voice::default(); MAX_VOICES],
+        }
     }
 
     /// Start a sound, stealing the quietest playing voice if the pool is full.
@@ -1422,7 +1542,12 @@ impl Mixer {
                 worst
             }
         };
-        self.voices[idx] = Voice { slot, pos: 0.0, rate: cmd.rate, gain: cmd.gain };
+        self.voices[idx] = Voice {
+            slot,
+            pos: 0.0,
+            rate: cmd.rate,
+            gain: cmd.gain,
+        };
     }
 
     /// Sum every playing voice into `out`, apply `master`, then limit.
@@ -1431,7 +1556,11 @@ impl Mixer {
     /// matter how many voices are playing or how loud they are.
     pub fn render_mono(&mut self, out: &mut [f32], master: f32) {
         out.fill(0.0);
-        let master = if master.is_finite() { master.clamp(0.0, 4.0) } else { 0.0 };
+        let master = if master.is_finite() {
+            master.clamp(0.0, 4.0)
+        } else {
+            0.0
+        };
 
         // Split the borrow: the bank is read while the voices are advanced.
         let Mixer { bank, voices } = self;
@@ -1756,7 +1885,11 @@ mod tests {
         let x = &b.slots[material_slot(Material::Stone, Action::Dig, 0)];
         let y = &b.slots[material_slot(Material::Stone, Action::Dig, 1)];
         let n = x.len().min(y.len());
-        let d: f32 = x[..n].iter().zip(y[..n].iter()).map(|(p, q)| (p - q).abs()).sum::<f32>()
+        let d: f32 = x[..n]
+            .iter()
+            .zip(y[..n].iter())
+            .map(|(p, q)| (p - q).abs())
+            .sum::<f32>()
             / n as f32;
         assert!(d > 0.01, "the stone dig variants are the same sound ({d})");
     }
@@ -1795,7 +1928,10 @@ mod tests {
         }
         // And it really did have to work for it: a mix that never approached the
         // ceiling would prove nothing.
-        assert!(loudest > LIMITER_KNEE, "the pool never got loud enough to test");
+        assert!(
+            loudest > LIMITER_KNEE,
+            "the pool never got loud enough to test"
+        );
     }
 
     #[test]
@@ -1830,9 +1966,18 @@ mod tests {
         mx.render_mono(&mut out, DEFAULT_MASTER_VOLUME);
         let rms = (out.iter().map(|s| s * s).sum::<f32>() / out.len() as f32).sqrt();
         let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-        assert!(rms > 0.02, "a block break at nominal gain is inaudible (rms {rms})");
-        assert!(peak > 0.10, "a block break barely moves the cone (peak {peak})");
-        assert!(peak <= LIMITER_CEILING, "one voice alone should not limit ({peak})");
+        assert!(
+            rms > 0.02,
+            "a block break at nominal gain is inaudible (rms {rms})"
+        );
+        assert!(
+            peak > 0.10,
+            "a block break barely moves the cone (peak {peak})"
+        );
+        assert!(
+            peak <= LIMITER_CEILING,
+            "one voice alone should not limit ({peak})"
+        );
     }
 
     #[test]
@@ -1851,7 +1996,10 @@ mod tests {
         }
         let per_second = plays as f32 / 2.0;
         assert!(per_second <= 13.0, "{per_second} ticks a second is a buzz");
-        assert!(per_second >= 7.0, "{per_second} ticks a second reads as broken, not slow");
+        assert!(
+            per_second >= 7.0,
+            "{per_second} ticks a second reads as broken, not slow"
+        );
     }
 
     #[test]
@@ -1869,7 +2017,11 @@ mod tests {
     #[test]
     fn voices_free_themselves_when_they_finish() {
         let mut mx = Mixer::new(bank());
-        mx.trigger(Cmd { slot: material_slot(Material::Stone, Action::Dig, 0) as u16, rate: 1.0, gain: 0.5 });
+        mx.trigger(Cmd {
+            slot: material_slot(Material::Stone, Action::Dig, 0) as u16,
+            rate: 1.0,
+            gain: 0.5,
+        });
         assert_eq!(mx.active_voices(), 1);
         let mut out = vec![0.0f32; 8192]; // longer than any dig buffer
         mx.render_mono(&mut out, 1.0);
@@ -1879,7 +2031,11 @@ mod tests {
     #[test]
     fn a_bad_slot_is_ignored_rather_than_panicking() {
         let mut mx = Mixer::new(bank());
-        mx.trigger(Cmd { slot: u16::MAX, rate: 1.0, gain: 1.0 });
+        mx.trigger(Cmd {
+            slot: u16::MAX,
+            rate: 1.0,
+            gain: 1.0,
+        });
         assert_eq!(mx.active_voices(), 0);
         let mut out = vec![0.0f32; 256];
         mx.render_mono(&mut out, 1.0);
@@ -2004,11 +2160,17 @@ mod tests {
         assert!(!a.is_enabled());
         // Every call must be a harmless no-op, including the daft ones.
         a.play(Sound::Dig(BlockId::STONE), PlayOpts::default());
-        a.play(Sound::Explosion, PlayOpts::at(Vec3::ZERO, Vec3::new(1000.0, 0.0, 0.0)));
+        a.play(
+            Sound::Explosion,
+            PlayOpts::at(Vec3::ZERO, Vec3::new(1000.0, 0.0, 0.0)),
+        );
         a.play(Sound::Wind, PlayOpts::default().with_volume(f32::NAN));
         a.play(Sound::MobHurt, PlayOpts::at(Vec3::NAN, Vec3::ZERO));
         a.play(Sound::BowShot, PlayOpts::default().with_pitch(0.0));
-        a.play(Sound::PlayerHurt, PlayOpts::default().with_pitch(f32::INFINITY));
+        a.play(
+            Sound::PlayerHurt,
+            PlayOpts::default().with_pitch(f32::INFINITY),
+        );
         a.footstep(BlockId::GRASS, 4.0, true, 0.016);
         a.footstep(BlockId::AIR, 4.0, false, 0.016);
         a.ambience(Vec3::ZERO, true, 100.0);
@@ -2033,7 +2195,10 @@ mod tests {
             t.elapsed()
         );
         for _ in 0..500 {
-            a.play(Sound::Dig(BlockId::STONE), PlayOpts::at(Vec3::ZERO, Vec3::ZERO));
+            a.play(
+                Sound::Dig(BlockId::STONE),
+                PlayOpts::at(Vec3::ZERO, Vec3::ZERO),
+            );
         }
         a.set_master_volume(0.0);
         drop(a);
@@ -2045,7 +2210,8 @@ mod tests {
         // rejection rests on rather than the send itself.
         let far = Vec3::new(MAX_AUDIBLE_DISTANCE + 1.0, 0.0, 0.0);
         assert!(far.distance_squared(Vec3::ZERO) > MAX_AUDIBLE_DISTANCE * MAX_AUDIBLE_DISTANCE);
-        let att = |d: f32| 1.0 / (1.0 + d * d / (ATTENUATION_HALF_DISTANCE * ATTENUATION_HALF_DISTANCE));
+        let att =
+            |d: f32| 1.0 / (1.0 + d * d / (ATTENUATION_HALF_DISTANCE * ATTENUATION_HALF_DISTANCE));
         assert!((att(0.0) - 1.0).abs() < 1.0e-6);
         assert!((att(ATTENUATION_HALF_DISTANCE) - 0.5).abs() < 1.0e-6);
         assert!(att(MAX_AUDIBLE_DISTANCE) * GAIN_BREAK < GAIN_BREAK * 0.05);
@@ -2073,7 +2239,15 @@ mod tests {
 
     #[test]
     fn a_daft_sample_rate_still_renders() {
-        for sr in [8000.0, 22_050.0, 48_000.0, 96_000.0, 192_000.0, f32::NAN, 0.0] {
+        for sr in [
+            8000.0,
+            22_050.0,
+            48_000.0,
+            96_000.0,
+            192_000.0,
+            f32::NAN,
+            0.0,
+        ] {
             let b = Bank::render(sr);
             assert_eq!(b.len(), TOTAL_SLOTS);
             for (i, buf) in every_slot(&b) {

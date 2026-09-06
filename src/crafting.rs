@@ -236,9 +236,43 @@ pub struct Furnace {
     progress: f32,
 }
 
+/// Complete durable state of a furnace. Kept as a value type so save code can
+/// snapshot and restore a furnace without reaching into its simulation internals.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct FurnaceState {
+    pub input: Option<ItemStack>,
+    pub fuel: Option<ItemStack>,
+    pub output: Option<ItemStack>,
+    pub burn_left: f32,
+    pub burn_total: f32,
+    pub progress: f32,
+}
+
 impl Furnace {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn from_state(state: FurnaceState) -> Self {
+        Self {
+            input: state.input,
+            fuel: state.fuel,
+            output: state.output,
+            burn_left: state.burn_left.max(0.0),
+            burn_total: state.burn_total.max(0.0),
+            progress: state.progress.max(0.0),
+        }
+    }
+
+    pub fn state(&self) -> FurnaceState {
+        FurnaceState {
+            input: self.input,
+            fuel: self.fuel,
+            output: self.output,
+            burn_left: self.burn_left,
+            burn_total: self.burn_total,
+            progress: self.progress,
+        }
     }
 
     pub fn is_burning(&self) -> bool {
@@ -454,7 +488,10 @@ mod tests {
     #[test]
     fn every_recipe_names_items_that_exist() {
         for r in recipes() {
-            assert!(r.output.is_valid(), "recipe makes an item that does not exist");
+            assert!(
+                r.output.is_valid(),
+                "recipe makes an item that does not exist"
+            );
             assert!(r.count > 0 && r.count <= 64);
             match &r.pattern {
                 Pattern::Shapeless(items) => {
@@ -629,7 +666,10 @@ mod tests {
         }
         assert_eq!(f.output.unwrap().item, ItemId::DIRT);
         assert_eq!(f.input.unwrap().count, 1);
-        assert!(!f.is_burning(), "fuel should not be spent on a blocked furnace");
+        assert!(
+            !f.is_burning(),
+            "fuel should not be spent on a blocked furnace"
+        );
     }
 
     #[test]

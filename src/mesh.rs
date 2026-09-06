@@ -17,7 +17,7 @@
 //!    with see-through gaps between them.
 
 use crate::block::BlockId;
-use crate::chunk::{local_index, Chunk, ChunkPos, SubMask};
+use crate::chunk::{Chunk, ChunkPos, SubMask, local_index};
 use crate::config::{AO_STRENGTH, CARVE_SHADE, CHUNK_SIZE, FACE_SHADE, SUBVOX};
 use crate::light;
 use crate::worldgen::TerrainGen;
@@ -114,8 +114,8 @@ impl Neighborhood {
             let mut h = vec![0i32; PAD * PAD];
             for pz in 0..PAD {
                 for px in 0..PAD {
-                    h[pz * PAD + px] = terrain
-                        .height_at(origin.0 + px as i32 - 1, origin.2 + pz as i32 - 1);
+                    h[pz * PAD + px] =
+                        terrain.height_at(origin.0 + px as i32 - 1, origin.2 + pz as i32 - 1);
                 }
             }
             h
@@ -283,11 +283,11 @@ pub const FACE_NORMALS: [[i32; 3]; 6] = [
 /// side, and the bark the right way up on a log.
 fn face_uv(face: usize, c: [f32; 3]) -> [f32; 2] {
     match face {
-        0 => [c[0], c[2]],           // +Y top
-        1 => [c[0], 1.0 - c[2]],     // -Y bottom
+        0 => [c[0], c[2]],             // +Y top
+        1 => [c[0], 1.0 - c[2]],       // -Y bottom
         2 => [1.0 - c[0], 1.0 - c[1]], // +Z
-        3 => [c[0], 1.0 - c[1]],     // -Z
-        4 => [c[2], 1.0 - c[1]],     // +X
+        3 => [c[0], 1.0 - c[1]],       // -Z
+        4 => [c[2], 1.0 - c[1]],       // +X
         _ => [1.0 - c[2], 1.0 - c[1]], // -X
     }
 }
@@ -538,7 +538,11 @@ fn emit_subvoxel_block(
                     }
                     // Carved surfaces take a flat shade; per-sub-voxel AO is not
                     // worth the cost at this scale.
-                    let lit = if inside { interior_light } else { face_light[f] };
+                    let lit = if inside {
+                        interior_light
+                    } else {
+                        face_light[f]
+                    };
                     let l = FACE_SHADE[f] * CARVE_SHADE * lit;
                     push_quad(verts, indices, corners, color, [l, l, l, l], uvs);
                 }
@@ -650,7 +654,9 @@ mod tests {
         for v in &verts {
             assert!(
                 v.pos[0] >= ox as f32 && v.pos[0] <= ox as f32 + 1.0,
-                "x {} outside the block's world column {}", v.pos[0], ox
+                "x {} outside the block's world column {}",
+                v.pos[0],
+                ox
             );
             assert!(v.pos[1] >= oy as f32 && v.pos[1] <= oy as f32 + 1.0);
             assert!(v.pos[2] >= oz as f32 && v.pos[2] <= oz as f32 + 1.0);

@@ -16,12 +16,12 @@ use crate::block::BlockId;
 use crate::chunk::{Chunk, ChunkPos, SubMask};
 use crate::config::*;
 use crate::light::{self, LightVolume};
-use crate::mesh::{mesh_chunk, Neighborhood, Vertex, NEIGHBOR_COUNT};
+use crate::mesh::{NEIGHBOR_COUNT, Neighborhood, Vertex, mesh_chunk};
 use crate::worldgen::{ColumnBounds, TerrainGen};
 use glam::Vec3;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 /// World-space block coordinate to (chunk, local) coordinates.
@@ -77,6 +77,9 @@ pub struct ChunkMeshData {
 #[derive(Default)]
 pub struct StreamResult {
     pub dropped: Vec<ChunkPos>,
+    /// Chunks accepted from generation this frame, including empty or fully
+    /// hidden chunks that will never produce a mesh.
+    pub arrived: Vec<ChunkPos>,
     pub ready: Vec<ChunkMeshData>,
 }
 
@@ -97,6 +100,9 @@ pub struct World {
     /// Cached conservative surface bounds per chunk-column.
     bounds: HashMap<(i32, i32), ColumnBounds>,
     center: Option<ChunkPos>,
+    /// Exact generation set for the current center. Results from an older
+    /// center are allowed to finish on workers, then discarded at intake.
+    wanted: HashSet<ChunkPos>,
 
     gen_queue: VecDeque<ChunkPos>,
     gen_queued: HashSet<ChunkPos>,
@@ -146,6 +152,7 @@ impl World {
             terrain: Arc::new(TerrainGen::new(seed)),
             bounds: HashMap::new(),
             center: None,
+            wanted: HashSet::new(),
             gen_queue: VecDeque::new(),
             gen_queued: HashSet::new(),
             generating: HashSet::new(),
@@ -297,11 +304,7 @@ impl World {
     /// spawner wants -- a torch-lit room reads bright at midnight, and a cave
     /// reads dark at noon.
     pub fn effective_light_at(&self, x: i32, y: i32, z: i32, daylight: f32) -> u8 {
-        light::effective_level(
-            self.light_at(x, y, z),
-            self.sky_light_at(x, y, z),
-            daylight,
-        )
+        light::effective_level(self.light_at(x, y, z), self.sky_light_at(x, y, z), daylight)
     }
 
     /// Tell the world what time it is. Cheap to call every frame: it only does
@@ -455,7 +458,9 @@ impl World {
         let (cx, lx) = split_coord(x);
         let (cy, ly) = split_coord(y);
         let (cz, lz) = split_coord(z);
-        self.chunks.get(&ChunkPos::new(cx, cy, cz))?.mask(lx, ly, lz)
+        self.chunks
+            .get(&ChunkPos::new(cx, cy, cz))?
+            .mask(lx, ly, lz)
     }
 
     /// True when an axis-aligned box overlaps material the player collides with.
@@ -490,14 +495,7 @@ impl World {
         false
     }
 
-    fn mask_overlaps_box(
-        mask: &SubMask,
-        bx: i32,
-        by: i32,
-        bz: i32,
-        min: Vec3,
-        max: Vec3,
-    ) -> bool {
+    fn mask_overlaps_box(mask: &SubMask, bx: i32, by: i32, bz: i32, min: Vec3, max: Vec3) -> bool {
         let e = COLLIDE_EPSILON;
         let range = |lo: f32, hi: f32, base: i32| -> (usize, usize) {
             let a = (((lo + e) - base as f32) * SUBVOX_F).floor();
@@ -536,11 +534,7 @@ impl World {
         let d = dir.normalize();
         // Work in sub-voxel units: one grid cell is 1/8 of a block.
         let p = origin * SUBVOX_F;
-        let mut cell = [
-            p.x.floor() as i32,
-            p.y.floor() as i32,
-            p.z.floor() as i32,
-        ];
+        let mut cell = [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32];
         let dv = [d.x, d.y, d.z];
         let pv = [p.x, p.y, p.z];
 
@@ -829,7 +823,7 @@ impl World {
             self.center = Some(center);
         }
 
-        self.intake_generated();
+        out.arrived = self.intake_generated();
         out.ready = self.collect_meshes();
         self.debug_light_scene(center);
         self.drain_relight();
@@ -893,7 +887,11 @@ impl World {
                     } else if edge || dy == h {
                         // A skylight in the roof, off to one side.
                         let hole = dy == h && (dx - 8).abs() <= 1 && (dz - 8).abs() <= 1;
-                        if hole { BlockId::AIR } else { BlockId::COBBLESTONE }
+                        if hole {
+                            BlockId::AIR
+                        } else {
+                            BlockId::COBBLESTONE
+                        }
                     } else {
                         BlockId::AIR
                     };
@@ -936,7 +934,10 @@ impl World {
                 let t0 = Instant::now();
                 self.set_block(cx + dx, floor + 1, cz + dz, BlockId::TORCH);
                 if torches == 0 {
-                    println!("[lightdemo] one torch: {:.2} ms", t0.elapsed().as_secs_f32() * 1000.0);
+                    println!(
+                        "[lightdemo] one torch: {:.2} ms",
+                        t0.elapsed().as_secs_f32() * 1000.0
+                    );
                 }
                 torches += 1;
             }
@@ -1028,6 +1029,7 @@ impl World {
 
     fn rebuild_gen_queue(&mut self, center: ChunkPos) {
         let wanted = self.wanted_chunks(center);
+        self.wanted = wanted.iter().copied().collect();
         self.gen_queue.clear();
         self.gen_queued.clear();
         for p in wanted {
@@ -1097,15 +1099,20 @@ impl World {
         }
     }
 
-    fn intake_generated(&mut self) {
+    fn intake_generated(&mut self) -> Vec<ChunkPos> {
+        let mut arrived = Vec::new();
         for _ in 0..GEN_INTAKE_PER_FRAME {
             let Ok((pos, chunk)) = self.gen_rx.try_recv() else {
                 break;
             };
             self.generating.remove(&pos);
+            if !self.wanted.contains(&pos) {
+                continue;
+            }
             self.stats.chunks_generated += 1;
             let empty = chunk.is_empty();
             self.chunks.insert(pos, Arc::new(chunk));
+            arrived.push(pos);
             // Light is seeded per chunk in isolation, so anything that should
             // cross this chunk's faces has not moved yet.
             self.merge_light_borders(pos);
@@ -1118,6 +1125,7 @@ impl World {
                 self.enqueue_mesh(pos, false);
             }
         }
+        arrived
     }
 
     fn enqueue_mesh(&mut self, pos: ChunkPos, urgent: bool) {
@@ -1306,9 +1314,7 @@ impl World {
         self.enqueue_mesh(pos, true);
         // A block on a chunk boundary changes the neighbour's visible faces too.
         let last = CHUNK_SIZE - 1;
-        let mut touch = |dx: i32, dy: i32, dz: i32| {
-            ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
-        };
+        let touch = |dx: i32, dy: i32, dz: i32| ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
         let mut neighbours = Vec::new();
         if lx == 0 {
             neighbours.push(touch(-1, 0, 0));
@@ -1581,7 +1587,11 @@ mod tests {
         let hit = w.raycast(Vec3::new(4.5, 2.5, 2.5), Vec3::X, 12.0).unwrap();
         let removed = w.chip_sphere(&hit, CHIP_RADIUS);
         assert!(removed > 0, "a chip must remove something");
-        assert_eq!(w.block_at(10, 2, 2), BlockId::STONE, "one chip is not a break");
+        assert_eq!(
+            w.block_at(10, 2, 2),
+            BlockId::STONE,
+            "one chip is not a break"
+        );
         assert!(w.fill_ratio(10, 2, 2) < 1.0);
 
         let events = w.drain_noise();
@@ -1703,15 +1713,14 @@ mod tests {
         let total: usize = positions
             .par_iter()
             .map(|pos| {
-                let neighbors: [Option<Arc<Chunk>>; NEIGHBOR_COUNT] =
-                    std::array::from_fn(|i| {
-                        let dx = (i % 3) as i32 - 1;
-                        let dz = ((i / 3) % 3) as i32 - 1;
-                        let dy = (i / 9) as i32 - 1;
-                        chunks
-                            .get(&ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz))
-                            .cloned()
-                    });
+                let neighbors: [Option<Arc<Chunk>>; NEIGHBOR_COUNT] = std::array::from_fn(|i| {
+                    let dx = (i % 3) as i32 - 1;
+                    let dz = ((i / 3) % 3) as i32 - 1;
+                    let dy = (i / 9) as i32 - 1;
+                    chunks
+                        .get(&ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz))
+                        .cloned()
+                });
                 let nb = Neighborhood::build(*pos, &neighbors, &terrain, 0);
                 mesh_chunk(&nb).0.len()
             })
@@ -1757,7 +1766,12 @@ mod tests {
             "streaming produced no resident chunks"
         );
         // The vertical policy has to actually cut the naive column count.
-        let naive = w.chunks.keys().map(|p| (p.x, p.z)).collect::<HashSet<_>>().len()
+        let naive = w
+            .chunks
+            .keys()
+            .map(|p| (p.x, p.z))
+            .collect::<HashSet<_>>()
+            .len()
             * CHUNK_COLUMN as usize;
         println!(
             "resident chunks {} across {} columns (naive full-column would be {})",
@@ -1805,6 +1819,34 @@ mod tests {
         assert_eq!(w.fill_ratio(0, s, 0), 1.0);
         assert!(w.sub_solid(0, s, 0, 0, 0, 0));
     }
+
+    #[test]
+    fn a_generation_result_for_an_abandoned_center_is_discarded() {
+        let mut w = World::new(1337);
+        let stale = ChunkPos::new(40, 10, 40);
+        w.generating.insert(stale);
+        w.gen_tx.send((stale, Chunk::new(stale))).unwrap();
+
+        w.intake_generated();
+
+        assert!(!w.chunks.contains_key(&stale));
+        assert!(!w.generating.contains(&stale));
+    }
+
+    #[test]
+    fn an_empty_generated_chunk_is_still_reported_as_arrived() {
+        let mut w = World::new(1337);
+        let pos = ChunkPos::new(0, 4, 0);
+        w.rebuild_gen_queue(pos);
+        w.generating.insert(pos);
+        w.gen_tx.send((pos, Chunk::new(pos))).unwrap();
+
+        let arrived = w.intake_generated();
+
+        assert_eq!(arrived, vec![pos]);
+        assert!(w.chunks.contains_key(&pos));
+        assert!(w.mesh_queue.is_empty(), "empty chunks do not need a mesh");
+    }
 }
 
 #[cfg(test)]
@@ -1818,7 +1860,9 @@ mod scratch_probe {
         let deadline = Instant::now() + std::time::Duration::from_secs(120);
         loop {
             w.stream(center);
-            if w.is_idle() { break; }
+            if w.is_idle() {
+                break;
+            }
             assert!(Instant::now() < deadline);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -1828,7 +1872,9 @@ mod scratch_probe {
             let mut air = 0;
             for z in -20..20 {
                 for x in -20..20 {
-                    if w.block_at(x, y, z).is_air() { air += 1; }
+                    if w.block_at(x, y, z).is_air() {
+                        air += 1;
+                    }
                     hist[w.sky_light_at(x, y, z) as usize] += 1;
                 }
             }
@@ -1840,7 +1886,12 @@ mod scratch_probe {
             if let Some((verts, _)) = w.mesh_now(pos) {
                 let mx = verts.iter().map(|v| v.light).fold(0.0f32, f32::max);
                 let mn = verts.iter().map(|v| v.light).fold(9.0f32, f32::min);
-                println!("chunk y={cy}: {} verts, light {:.3}..{:.3}", verts.len(), mn, mx);
+                println!(
+                    "chunk y={cy}: {} verts, light {:.3}..{:.3}",
+                    verts.len(),
+                    mn,
+                    mx
+                );
             }
         }
     }

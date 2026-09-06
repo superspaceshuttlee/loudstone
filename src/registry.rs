@@ -577,7 +577,10 @@ impl Registry {
             if b.name.is_empty() {
                 return Err(blocks_src.err(format!("the block with id {} has no name", b.id)));
             }
-            if block_by_name.insert(b.name.clone(), BlockId(b.id)).is_some() {
+            if block_by_name
+                .insert(b.name.clone(), BlockId(b.id))
+                .is_some()
+            {
                 return Err(blocks_src.err(format!(
                     "two blocks are named \"{}\" -- names must be unique",
                     b.name
@@ -638,7 +641,9 @@ impl Registry {
 
             let tool = match &e.tool {
                 None => None,
-                Some((kind, tier_name)) => Some((*kind, lookup_tier(tier_name, items_src, &where_)?)),
+                Some((kind, tier_name)) => {
+                    Some((*kind, lookup_tier(tier_name, items_src, &where_)?))
+                }
             };
 
             let max_stack = e.max_stack.unwrap_or(if tool.is_some() { 1 } else { 64 });
@@ -788,13 +793,13 @@ impl Registry {
                         _ => None,
                     }
                 }
-                Drops::Item(name) => Some(item_by_name.get(name.as_str()).copied().ok_or_else(
-                    || {
+                Drops::Item(name) => {
+                    Some(item_by_name.get(name.as_str()).copied().ok_or_else(|| {
                         blocks_src.err(format!(
                             "{where_} drops \"{name}\", which no entry in {ITEMS_FILE} defines"
                         ))
-                    },
-                )?),
+                    })?)
+                }
             };
 
             blocks[e.id as usize] = Some(BlockDef {
@@ -814,7 +819,9 @@ impl Registry {
         // combinations, so all nine must exist and none may be claimed twice.
         let mut tool_items = [[None::<ItemId>; 3]; 3];
         for def in items.iter().flatten() {
-            let Some((kind, tier)) = def.tool else { continue };
+            let Some((kind, tier)) = def.tool else {
+                continue;
+            };
             let slot = &mut tool_items[kind_index(kind)][tier_index(tier)];
             if let Some(prev) = *slot {
                 let prev_name = items[prev.0 as usize]
@@ -881,8 +888,7 @@ impl Registry {
             let where_ = format!("shaped recipe for \"{}\"", e.output);
             let output = lookup_item(&e.output, &item_by_name, recipes_src, &where_)?;
             check_count(e.count, recipes_src, &where_)?;
-            let (width, height, cells) =
-                build_pattern(e, &item_by_name, recipes_src, &where_)?;
+            let (width, height, cells) = build_pattern(e, &item_by_name, recipes_src, &where_)?;
             recipes.push(Recipe {
                 pattern: Pattern::Shaped {
                     width,
@@ -1318,7 +1324,11 @@ mod tests {
         let r = embedded();
         let known = |i: ItemId| r.item(i).is_some();
         for recipe in r.recipes() {
-            assert!(known(recipe.output), "recipe output {:?} is unknown", recipe.output);
+            assert!(
+                known(recipe.output),
+                "recipe output {:?} is unknown",
+                recipe.output
+            );
             assert!(recipe.count > 0);
             match &recipe.pattern {
                 Pattern::Shapeless(items) => {
@@ -1351,7 +1361,10 @@ mod tests {
         for n in 0..=BlockId::MAX {
             let def = r.block(BlockId(n)).expect("defined");
             if let Some(d) = def.drop {
-                assert!(r.item(d).is_some(), "block {n} drops an item that does not exist");
+                assert!(
+                    r.item(d).is_some(),
+                    "block {n} drops an item that does not exist"
+                );
             }
             if let Some((kind, tier)) = def.harvest.required {
                 assert_eq!(def.harvest.effective, Some(kind));
@@ -1391,28 +1404,52 @@ mod tests {
 
     #[test]
     fn an_unknown_field_is_named() {
-        let e = load_broken_blocks(&blocks_with("hardness: 1.5,\n            tool: Pickaxe", "hardnes: 1.5,\n            tool: Pickaxe"));
+        let e = load_broken_blocks(&blocks_with(
+            "hardness: 1.5,\n            tool: Pickaxe",
+            "hardnes: 1.5,\n            tool: Pickaxe",
+        ));
         assert!(e.to_string().contains("hardnes"), "{e}");
     }
 
     #[test]
     fn a_duplicate_id_is_rejected_by_name() {
-        let e = load_broken_blocks(&blocks_with("(id: 19, name: \"gravel\"", "(id: 18, name: \"gravel\""));
-        assert!(e.detail.contains("gravel") && e.detail.contains("18"), "{e}");
+        let e = load_broken_blocks(&blocks_with(
+            "(id: 19, name: \"gravel\"",
+            "(id: 18, name: \"gravel\"",
+        ));
+        assert!(
+            e.detail.contains("gravel") && e.detail.contains("18"),
+            "{e}"
+        );
     }
 
     #[test]
     fn an_unknown_drop_item_is_rejected_by_name() {
-        let e = load_broken_blocks(&blocks_with("drops: Item(\"raw_iron\")", "drops: Item(\"raw_irn\")"));
-        assert!(e.detail.contains("iron_ore") && e.detail.contains("raw_irn"), "{e}");
+        let e = load_broken_blocks(&blocks_with(
+            "drops: Item(\"raw_iron\")",
+            "drops: Item(\"raw_irn\")",
+        ));
+        assert!(
+            e.detail.contains("iron_ore") && e.detail.contains("raw_irn"),
+            "{e}"
+        );
         assert!(e.detail.contains(ITEMS_FILE), "{e}");
     }
 
     #[test]
     fn an_undefined_tool_tier_is_rejected_by_name() {
-        let e = load_broken_blocks(&blocks_with("requires: Tier(\"stone\")", "requires: Tier(\"bronze\")"));
-        assert!(e.detail.contains("bronze") && e.detail.contains("iron_ore"), "{e}");
-        assert!(e.detail.contains("wood"), "the message should list the real tiers: {e}");
+        let e = load_broken_blocks(&blocks_with(
+            "requires: Tier(\"stone\")",
+            "requires: Tier(\"bronze\")",
+        ));
+        assert!(
+            e.detail.contains("bronze") && e.detail.contains("iron_ore"),
+            "{e}"
+        );
+        assert!(
+            e.detail.contains("wood"),
+            "the message should list the real tiers: {e}"
+        );
     }
 
     #[test]
@@ -1421,25 +1458,43 @@ mod tests {
             "(id: 18, name: \"sandstone\",      color: [0.76, 0.70, 0.49], hardness: 0.9)",
             "(id: 18, name: \"sandstone\",      color: [0.76, 0.70, 0.49], hardness: 0.9, requires: Tier(\"iron\"))",
         ));
-        assert!(e.detail.contains("sandstone") && e.detail.contains("tool"), "{e}");
+        assert!(
+            e.detail.contains("sandstone") && e.detail.contains("tool"),
+            "{e}"
+        );
     }
 
     #[test]
     fn an_unknown_tag_is_rejected_and_the_real_ones_listed() {
-        let e = load_broken_blocks(&blocks_with("tags: [\"grassy\"], drops: Item(\"dirt\")", "tags: [\"grasy\"], drops: Item(\"dirt\")"));
-        assert!(e.detail.contains("grasy") && e.detail.contains("grassy"), "{e}");
+        let e = load_broken_blocks(&blocks_with(
+            "tags: [\"grassy\"], drops: Item(\"dirt\")",
+            "tags: [\"grasy\"], drops: Item(\"dirt\")",
+        ));
+        assert!(
+            e.detail.contains("grasy") && e.detail.contains("grassy"),
+            "{e}"
+        );
     }
 
     #[test]
     fn an_impossible_hardness_is_rejected() {
         let e = load_broken_blocks(&blocks_with("hardness: 0.9)", "hardness: 0.0)"));
-        assert!(e.detail.contains("sandstone") && e.detail.contains("hardness"), "{e}");
+        assert!(
+            e.detail.contains("sandstone") && e.detail.contains("hardness"),
+            "{e}"
+        );
     }
 
     #[test]
     fn a_colour_outside_the_range_is_rejected() {
-        let e = load_broken_blocks(&blocks_with("color: [0.76, 0.70, 0.49]", "color: [76.0, 0.70, 0.49]"));
-        assert!(e.detail.contains("sandstone") && e.detail.contains("colour"), "{e}");
+        let e = load_broken_blocks(&blocks_with(
+            "color: [0.76, 0.70, 0.49]",
+            "color: [76.0, 0.70, 0.49]",
+        ));
+        assert!(
+            e.detail.contains("sandstone") && e.detail.contains("colour"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1447,23 +1502,40 @@ mod tests {
         let recipes = EMBEDDED_RECIPES.replacen("output: \"stick\"", "output: \"stik\"", 1);
         let e = Registry::from_str_data(EMBEDDED_BLOCKS, EMBEDDED_ITEMS, &recipes)
             .expect_err("an unknown recipe output must be rejected");
-        assert!(e.detail.contains("stik") && e.detail.contains(ITEMS_FILE), "{e}");
+        assert!(
+            e.detail.contains("stik") && e.detail.contains(ITEMS_FILE),
+            "{e}"
+        );
     }
 
     #[test]
     fn a_pattern_character_with_no_key_is_rejected() {
-        let recipes = EMBEDDED_RECIPES.replacen("\"CCC\",\n                \"C C\"", "\"CQC\",\n                \"C C\"", 1);
+        let recipes = EMBEDDED_RECIPES.replacen(
+            "\"CCC\",\n                \"C C\"",
+            "\"CQC\",\n                \"C C\"",
+            1,
+        );
         let e = Registry::from_str_data(EMBEDDED_BLOCKS, EMBEDDED_ITEMS, &recipes)
             .expect_err("an undrawable pattern character must be rejected");
-        assert!(e.detail.contains("furnace") && e.detail.contains('Q'), "{e}");
+        assert!(
+            e.detail.contains("furnace") && e.detail.contains('Q'),
+            "{e}"
+        );
     }
 
     #[test]
     fn a_pattern_wider_than_the_grid_is_rejected() {
-        let recipes = EMBEDDED_RECIPES.replacen("\"CCC\",\n                \"C C\"", "\"CCCC\",\n                \"C C\"", 1);
+        let recipes = EMBEDDED_RECIPES.replacen(
+            "\"CCC\",\n                \"C C\"",
+            "\"CCCC\",\n                \"C C\"",
+            1,
+        );
         let e = Registry::from_str_data(EMBEDDED_BLOCKS, EMBEDDED_ITEMS, &recipes)
             .expect_err("an oversized pattern must be rejected");
-        assert!(e.detail.contains("furnace") && e.detail.contains('4'), "{e}");
+        assert!(
+            e.detail.contains("furnace") && e.detail.contains('4'),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1475,12 +1547,16 @@ mod tests {
         );
         let e = Registry::from_str_data(EMBEDDED_BLOCKS, &items, EMBEDDED_RECIPES)
             .expect_err("a block item must carry its block's number");
-        assert!(e.detail.contains("dirt") && e.detail.contains("same number"), "{e}");
+        assert!(
+            e.detail.contains("dirt") && e.detail.contains("same number"),
+            "{e}"
+        );
     }
 
     #[test]
     fn a_missing_tier_is_rejected() {
-        let items = EMBEDDED_ITEMS.replacen("(name: \"stone\", rank: 2", "(name: \"bronze\", rank: 2", 1);
+        let items =
+            EMBEDDED_ITEMS.replacen("(name: \"stone\", rank: 2", "(name: \"bronze\", rank: 2", 1);
         let e = Registry::from_str_data(EMBEDDED_BLOCKS, &items, EMBEDDED_RECIPES)
             .expect_err("an unknown tier name must be rejected");
         assert!(e.detail.contains("bronze"), "{e}");
@@ -1488,7 +1564,8 @@ mod tests {
 
     #[test]
     fn out_of_order_tier_ranks_are_rejected() {
-        let items = EMBEDDED_ITEMS.replacen("(name: \"iron\",  rank: 3", "(name: \"iron\",  rank: 1", 1);
+        let items =
+            EMBEDDED_ITEMS.replacen("(name: \"iron\",  rank: 3", "(name: \"iron\",  rank: 1", 1);
         let e = Registry::from_str_data(EMBEDDED_BLOCKS, &items, EMBEDDED_RECIPES)
             .expect_err("ranks must increase with the tier order");
         assert!(e.detail.contains("rank"), "{e}");

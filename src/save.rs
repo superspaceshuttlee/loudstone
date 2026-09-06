@@ -84,6 +84,7 @@
 //! [`SaveError::UnsupportedVersion`] rather than misparsed.
 
 use crate::block::BlockId;
+use crate::crafting::{Furnace, FurnaceState};
 use crate::inventory::{Inventory, ItemStack, SLOT_COUNT};
 use crate::item::ItemId;
 use crate::mob::{DESPAWN_DISTANCE, Mob, MobKind, MobManager};
@@ -301,15 +302,7 @@ impl ChangeTracker {
     /// actually performed -- i.e. when `World::carve` was called on a solid
     /// block. Returns true if this carve emptied the block, matching what
     /// `World::carve` returns.
-    pub fn note_carve(
-        &mut self,
-        x: i32,
-        y: i32,
-        z: i32,
-        sx: usize,
-        sy: usize,
-        sz: usize,
-    ) -> bool {
+    pub fn note_carve(&mut self, x: i32, y: i32, z: i32, sx: usize, sy: usize, sz: usize) -> bool {
         let (key, index) = locate(x, y, z);
         let delta = self.chunks.entry(key).or_default();
         let mask = delta.masks.entry(index).or_insert(FULL_MASK);
@@ -542,6 +535,42 @@ impl ContainerSave {
         }
     }
 
+    pub fn from_furnace(furnace: &Furnace) -> Self {
+        let state = furnace.state();
+        Self::furnace(
+            state.input,
+            state.fuel,
+            state.output,
+            state.burn_left,
+            state.burn_total,
+            state.progress,
+        )
+    }
+
+    /// Convert a generic record into a live furnace. Unknown container kinds or
+    /// malformed furnace layouts stay preserved in the save but are not exposed
+    /// to the simulation.
+    pub fn to_furnace(&self) -> Option<Furnace> {
+        if self.kind != ContainerKind::FURNACE
+            || self.slots.len() != FURNACE_SLOTS
+            || self.fields.len() != FURNACE_FIELDS
+            || self
+                .fields
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return None;
+        }
+        Some(Furnace::from_state(FurnaceState {
+            input: self.slot(FURNACE_INPUT),
+            fuel: self.slot(FURNACE_FUEL),
+            output: self.slot(FURNACE_OUTPUT),
+            burn_left: self.burn_left(),
+            burn_total: self.burn_total(),
+            progress: self.progress(),
+        }))
+    }
+
     /// Contents of a slot, or `None` for an empty or out-of-range one.
     pub fn slot(&self, index: usize) -> Option<ItemStack> {
         self.slots.get(index).copied().flatten()
@@ -654,9 +683,15 @@ pub enum SaveError {
     /// The file is not a Loudstone save at all.
     BadMagic([u8; 4]),
     /// A save from a version this build does not understand.
-    UnsupportedVersion { found: u32, supported: u32 },
+    UnsupportedVersion {
+        found: u32,
+        supported: u32,
+    },
     /// The file ended in the middle of a record.
-    Truncated { needed: usize, available: usize },
+    Truncated {
+        needed: usize,
+        available: usize,
+    },
     /// Structurally intact but semantically impossible.
     Corrupt(&'static str),
 }
@@ -847,7 +882,10 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], SaveError> {
-        let end = self.pos.checked_add(n).ok_or(SaveError::Corrupt("length overflow"))?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or(SaveError::Corrupt("length overflow"))?;
         if end > self.data.len() {
             return Err(SaveError::Truncated {
                 needed: n,
@@ -1072,7 +1110,9 @@ fn read_containers(r: &mut Reader<'_>) -> Result<HashMap<BlockPos, ContainerSave
         let mut slots = vec![None; slot_count];
         let occupied = r.u8()? as usize;
         if occupied > slot_count {
-            return Err(SaveError::Corrupt("more filled slots than the container has"));
+            return Err(SaveError::Corrupt(
+                "more filled slots than the container has",
+            ));
         }
         for _ in 0..occupied {
             let (index, stack) = read_slot(r)?;
@@ -1087,14 +1127,26 @@ fn read_containers(r: &mut Reader<'_>) -> Result<HashMap<BlockPos, ContainerSave
 
         let field_count = r.u8()? as usize;
         if field_count > MAX_CONTAINER_FIELDS {
-            return Err(SaveError::Corrupt("container has more fields than possible"));
+            return Err(SaveError::Corrupt(
+                "container has more fields than possible",
+            ));
         }
         let mut fields = Vec::with_capacity(field_count);
         for _ in 0..field_count {
             fields.push(r.f32()?);
         }
 
-        if containers.insert(pos, ContainerSave { kind, slots, fields }).is_some() {
+        if containers
+            .insert(
+                pos,
+                ContainerSave {
+                    kind,
+                    slots,
+                    fields,
+                },
+            )
+            .is_some()
+        {
             return Err(SaveError::Corrupt("two containers at one block"));
         }
     }
@@ -1181,7 +1233,8 @@ mod tests {
         data.edits.note_set_block(5, 70, 5, BlockId::PLANKS);
         data.edits.note_set_block(5, 71, 5, BlockId::AIR);
         data.edits.note_set_block(-40, 12, 300, BLOCK_TORCH);
-        data.edits.note_set_block(200, 250, -200, BlockId::COBBLESTONE);
+        data.edits
+            .note_set_block(200, 250, -200, BlockId::COBBLESTONE);
 
         // A block chipped a little, and one chipped a lot but still standing.
         for sx in 0..4 {
@@ -1246,7 +1299,14 @@ mod tests {
         );
         data.set_container(
             (-40, 12, 301),
-            ContainerSave::furnace(None, Some(ItemStack::new(ItemId::PLANKS, 1)), None, 0.0, 0.0, 0.0),
+            ContainerSave::furnace(
+                None,
+                Some(ItemStack::new(ItemId::PLANKS, 1)),
+                None,
+                0.0,
+                0.0,
+                0.0,
+            ),
         );
         let mut chest = ContainerSave::new(ContainerKind::CHEST, 27, 0);
         chest.slots[0] = Some(ItemStack::new(ItemId::DIRT, 64));
@@ -1330,7 +1390,10 @@ mod tests {
         }
         assert_eq!(back.edits.block_at(9, 64, 9), None, "block still stands");
 
-        let heavy = back.edits.mask_at(-1, 33, -1).expect("heavily chipped block");
+        let heavy = back
+            .edits
+            .mask_at(-1, 33, -1)
+            .expect("heavily chipped block");
         let solid = heavy.iter().map(|b| b.count_ones()).sum::<u32>();
         assert_eq!(solid, 64, "one column of 8x8 should remain");
         for sy in 0..SUBVOX {
@@ -1417,9 +1480,15 @@ mod tests {
 
         assert_eq!(world.blocks.get(&(5, 70, 5)), Some(&BlockId::PLANKS));
         assert_eq!(world.blocks.get(&(5, 71, 5)), Some(&BlockId::AIR));
-        assert_eq!(world.blocks.get(&(200, 250, -200)), Some(&BlockId::COBBLESTONE));
+        assert_eq!(
+            world.blocks.get(&(200, 250, -200)),
+            Some(&BlockId::COBBLESTONE)
+        );
 
-        let mask = world.masks.get(&(9, 64, 9)).expect("chipped block restored");
+        let mask = world
+            .masks
+            .get(&(9, 64, 9))
+            .expect("chipped block restored");
         assert_eq!(mask, back.edits.mask_at(9, 64, 9).unwrap());
         let heavy = world.masks.get(&(-1, 33, -1)).unwrap();
         assert_eq!(heavy, back.edits.mask_at(-1, 33, -1).unwrap());
@@ -1507,7 +1576,8 @@ mod tests {
     fn impossible_inventory_data_is_rejected() {
         // A count of 200 cobblestone in one slot cannot happen.
         let mut data = SaveData::new(1);
-        data.inventory.set_slot(0, Some(ItemStack::new(ItemId::DIRT, 64)));
+        data.inventory
+            .set_slot(0, Some(ItemStack::new(ItemId::DIRT, 64)));
         // The single slot record sits immediately after the fixed header:
         // index u8, item u16, count u8, durability u16.
         let record = HEADER_BYTES;
@@ -1785,7 +1855,10 @@ mod tests {
 
         // The two sections a version 1 file does not have.
         assert!(data.mobs.is_empty(), "version 1 describes no mobs");
-        assert!(data.containers.is_empty(), "version 1 describes no containers");
+        assert!(
+            data.containers.is_empty(),
+            "version 1 describes no containers"
+        );
     }
 
     #[test]
@@ -1885,10 +1958,18 @@ mod tests {
 
         let live = vec![
             Mob::new(1, MobKind::Zombie, here + Vec3::new(5.0, 0.0, 0.0)),
-            Mob::new(2, MobKind::Pig, here + Vec3::new(0.0, 0.0, MOB_SAVE_RADIUS - 1.0)),
+            Mob::new(
+                2,
+                MobKind::Pig,
+                here + Vec3::new(0.0, 0.0, MOB_SAVE_RADIUS - 1.0),
+            ),
             // Beyond the despawn radius: the mob system would delete it on the
             // next tick anyway, so saving it would resurrect a ghost.
-            Mob::new(3, MobKind::Creeper, here + Vec3::new(0.0, 0.0, MOB_SAVE_RADIUS + 1.0)),
+            Mob::new(
+                3,
+                MobKind::Creeper,
+                here + Vec3::new(0.0, 0.0, MOB_SAVE_RADIUS + 1.0),
+            ),
             dead,
         ];
 
@@ -1985,7 +2066,10 @@ mod tests {
             furnace.slot(FURNACE_INPUT),
             Some(ItemStack::new(ItemId::RAW_IRON, 5))
         );
-        assert_eq!(furnace.slot(FURNACE_FUEL), Some(ItemStack::new(ItemId::COAL, 3)));
+        assert_eq!(
+            furnace.slot(FURNACE_FUEL),
+            Some(ItemStack::new(ItemId::COAL, 3))
+        );
         assert_eq!(
             furnace.slot(FURNACE_OUTPUT),
             Some(ItemStack::new(ItemId::IRON_INGOT, 2))
@@ -2050,6 +2134,23 @@ mod tests {
     }
 
     #[test]
+    fn furnace_container_conversion_preserves_live_state() {
+        let mut before = crate::crafting::Furnace::new();
+        before.input = Some(ItemStack::new(ItemId::RAW_IRON, 2));
+        before.fuel = Some(ItemStack::new(ItemId::COAL, 1));
+        before.tick(3.25);
+
+        let saved = ContainerSave::from_furnace(&before);
+        let after = saved.to_furnace().expect("a furnace record must restore");
+
+        assert_eq!(after.input, before.input);
+        assert_eq!(after.fuel, before.fuel);
+        assert_eq!(after.output, before.output);
+        assert_eq!(after.burn_fraction(), before.burn_fraction());
+        assert_eq!(after.progress_fraction(), before.progress_fraction());
+    }
+
+    #[test]
     fn a_container_kind_this_build_does_not_know_still_survives() {
         // The reason containers carry an open kind number: a save written by a
         // build with dispensers must not lose them when read by one without.
@@ -2067,7 +2168,10 @@ mod tests {
     fn an_empty_container_is_not_worth_a_record() {
         let mut data = SaveData::new(1);
         data.set_container((1, 2, 3), ContainerSave::new(ContainerKind::FURNACE, 3, 3));
-        assert!(data.containers.is_empty(), "an idle empty furnace is not state");
+        assert!(
+            data.containers.is_empty(),
+            "an idle empty furnace is not state"
+        );
 
         // ...but one that is merely mid-burn with empty slots is.
         data.set_container(
@@ -2124,7 +2228,9 @@ mod tests {
         over[slot_count_at] = 0;
         assert!(matches!(
             load_from_bytes(&over),
-            Err(SaveError::Corrupt("more filled slots than the container has"))
+            Err(SaveError::Corrupt(
+                "more filled slots than the container has"
+            ))
         ));
 
         // A slot index past the end of the container.
