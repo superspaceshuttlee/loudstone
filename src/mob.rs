@@ -746,6 +746,32 @@ impl MobManager {
         id
     }
 
+    /// Place a mob with an explicit velocity, facing and health -- how a mob comes
+    /// back out of a save file.
+    ///
+    /// Identical to [`MobManager::spawn`] in every other respect: the mob starts
+    /// idle, with no path and no AI timers running, and re-acquires the player the
+    /// same way a freshly spawned one does. `health` is clamped to the kind's
+    /// maximum; passing zero or less means the mob dies on the next `update`.
+    pub fn spawn_restored(
+        &mut self,
+        kind: MobKind,
+        pos: Vec3,
+        vel: Vec3,
+        yaw: f32,
+        health: f32,
+        on_ground: bool,
+    ) -> u32 {
+        let id = self.spawn(kind, pos);
+        if let Some(m) = self.mobs.last_mut() {
+            m.vel = vel;
+            m.yaw = yaw;
+            m.health = health.min(kind.stats().max_health);
+            m.on_ground = on_ground;
+        }
+        id
+    }
+
     /// Hurt a mob. Returns true if this killed it. Drops are pushed as events on the
     /// next `update`, or immediately if you drain events yourself.
     pub fn damage(&mut self, id: u32, amount: f32, knockback: Vec3) -> bool {

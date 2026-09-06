@@ -1,0 +1,163 @@
+// Loudstone recipes: crafting grids and furnace smelting.
+//
+// SHAPED recipes are drawn as rows of text, one character per cell, with a
+// `key` mapping each character to an item name. A space is an empty cell. The
+// drawing is the recipe's *minimal* shape: it matches anywhere inside a grid
+// big enough to hold it, and in either horizontal mirroring, so an axe works
+// left- or right-handed and a 1x2 recipe works in the 2x2 inventory grid.
+//
+//   pattern: [
+//       "PPP",
+//       " S ",
+//       " S ",
+//   ],
+//   key: { 'P': "planks", 'S': "stick" },
+//
+// Rows must be no wider than 3 and no more than 3 of them; short rows are
+// padded on the right, so leading spaces matter and trailing ones do not.
+// Anything needing more than a 2x2 shape can only be made at a crafting table.
+//
+// SHAPELESS recipes list ingredients in any arrangement. The grid must hold
+// exactly those items, one per occupied cell, and nothing else.
+//
+// SMELTING is what a furnace does: one input item becomes one output item
+// after `seconds` of burning. What burns, and for how long, is the `fuel`
+// field over in `items.ron`.
+//
+// Order matters only in that the first match wins. Every name here must exist
+// in `items.ron` or the game refuses to start and says which one does not.
+
+(
+    shapeless: [
+        // One log, four planks, in any grid, in any slot.
+        (output: "planks", count: 4, ingredients: ["wood"]),
+    ],
+
+    shaped: [
+        // --- basics ----------------------------------------------------------
+        (
+            output: "stick", count: 4,
+            pattern: [
+                "P",
+                "P",
+            ],
+            key: { 'P': "planks" },
+        ),
+        (
+            output: "crafting_table", count: 1,
+            pattern: [
+                "PP",
+                "PP",
+            ],
+            key: { 'P': "planks" },
+        ),
+        (
+            output: "furnace", count: 1,
+            pattern: [
+                "CCC",
+                "C C",
+                "CCC",
+            ],
+            key: { 'C': "cobblestone" },
+        ),
+        (
+            output: "torch", count: 4,
+            pattern: [
+                "O",
+                "S",
+            ],
+            key: { 'O': "coal", 'S': "stick" },
+        ),
+
+        // --- pickaxes: three across the top, two sticks down the middle ------
+        (
+            output: "wooden_pickaxe", count: 1,
+            pattern: [
+                "MMM",
+                " S ",
+                " S ",
+            ],
+            key: { 'M': "planks", 'S': "stick" },
+        ),
+        (
+            output: "stone_pickaxe", count: 1,
+            pattern: [
+                "MMM",
+                " S ",
+                " S ",
+            ],
+            key: { 'M': "cobblestone", 'S': "stick" },
+        ),
+        (
+            output: "iron_pickaxe", count: 1,
+            pattern: [
+                "MMM",
+                " S ",
+                " S ",
+            ],
+            key: { 'M': "iron_ingot", 'S': "stick" },
+        ),
+
+        // --- axes: an L of material on a stick shaft -------------------------
+        (
+            output: "wooden_axe", count: 1,
+            pattern: [
+                "MM",
+                "MS",
+                " S",
+            ],
+            key: { 'M': "planks", 'S': "stick" },
+        ),
+        (
+            output: "stone_axe", count: 1,
+            pattern: [
+                "MM",
+                "MS",
+                " S",
+            ],
+            key: { 'M': "cobblestone", 'S': "stick" },
+        ),
+        (
+            output: "iron_axe", count: 1,
+            pattern: [
+                "MM",
+                "MS",
+                " S",
+            ],
+            key: { 'M': "iron_ingot", 'S': "stick" },
+        ),
+
+        // --- swords: two material over one stick -----------------------------
+        (
+            output: "wooden_sword", count: 1,
+            pattern: [
+                "M",
+                "M",
+                "S",
+            ],
+            key: { 'M': "planks", 'S': "stick" },
+        ),
+        (
+            output: "stone_sword", count: 1,
+            pattern: [
+                "M",
+                "M",
+                "S",
+            ],
+            key: { 'M': "cobblestone", 'S': "stick" },
+        ),
+        (
+            output: "iron_sword", count: 1,
+            pattern: [
+                "M",
+                "M",
+                "S",
+            ],
+            key: { 'M': "iron_ingot", 'S': "stick" },
+        ),
+    ],
+
+    smelting: [
+        (input: "raw_iron", output: "iron_ingot", seconds: 10.0),
+    ],
+)

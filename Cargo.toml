@@ -11,6 +11,8 @@ noise = "0.9.0"
 pollster = "1.0.1"
 rand = "0.10.2"
 rayon = "1.12.0"
+ron = "0.12.2"
+serde = { version = "1.0.229", features = ["derive"] }
 wgpu = "30.0.1"
 winit = "0.30.13"
 

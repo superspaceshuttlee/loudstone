@@ -1,11 +1,28 @@
 //! Block identities and their static properties.
 //!
+//! # Where the properties live
+//!
+//! Nothing in this file decides what a block *is*. Colour, hardness, the
+//! booleans, the light it gives off, what it drops and what tool it demands all
+//! come from `assets/data/blocks.ron` by way of [`registry`]. Adding a block is
+//! one entry in that file plus a texture; it is not five `match` arms and a
+//! recompile.
+//!
+//! What stays here is the API the rest of the crate calls -- `BlockId::STONE`,
+//! `id.is_opaque()`, `id.hardness()` -- and the frozen numbers behind it.
+//!
 //! # Numbering
 //!
 //! Ids 0..=17 are **frozen**. `save.rs` writes raw block numbers into world
 //! files and `item.rs` derives item ids from them, so renumbering an existing
 //! block silently rewrites every save that mentions it. New blocks are appended
 //! from 18 upward and never inserted in the middle.
+//!
+//! The associated constants below stay constants deliberately: half the crate
+//! writes `match id { BlockId::STONE => ... }`, and a match pattern must be a
+//! compile-time constant. They are a frozen index into the registry, and
+//! `registry_ids_match_the_constants` fails the build if the data ever
+//! disagrees with them.
 
 // `main.rs` owns the crate's module list and is not this agent's file to edit,
 // so the procedural texture module is attached here with an explicit path. It is
@@ -16,14 +33,24 @@
 #[path = "texture.rs"]
 pub mod texture;
 
+// The content registry is attached the same way and for the same reason: it is
+// pure data with no renderer in it, and `main.rs` is not this agent's file to
+// edit. The integrator can promote it to a plain `mod registry;` in `main.rs`
+// and delete these two lines; only the `crate::block::registry` paths change.
+#[path = "registry.rs"]
+pub mod registry;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 #[repr(transparent)]
 pub struct BlockId(pub u8);
 
 /// How the mesher and the renderer must treat a block's geometry.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+///
+/// Spelled in `blocks.ron` as `render: Solid` and friends.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, serde::Deserialize)]
 pub enum RenderKind {
     /// A full cube, fully opaque texels, drawn in the depth-writing pass.
+    #[default]
     Solid,
     /// A full cube whose texture has holes: leaves. Alpha-cut, drawn with
     /// back faces kept so a canopy is not see-through.
@@ -110,89 +137,50 @@ impl BlockId {
 
     /// Whether this block occludes the face of a neighbour (and so that face is culled).
     ///
-    /// Leaves and the ground-cover plants are see-through, so they never hide a
-    /// face behind them. Ice is treated as opaque: with flat untextured colours
-    /// a "transparent" ice cube would look identical to an opaque one while
-    /// costing six extra faces per block.
+    /// `opaque` in `blocks.ron`. Leaves and the ground-cover plants are
+    /// see-through, so they never hide a face behind them. Ice is marked opaque
+    /// on purpose: with flat untextured colours a "transparent" ice cube would
+    /// look identical to an opaque one while costing six extra faces.
+    ///
+    /// This is the single hottest question in the engine -- the mesher asks it
+    /// once per candidate face -- so it is a flat array index, nothing more.
     #[inline]
     pub fn is_opaque(self) -> bool {
-        !matches!(
-            self,
-            BlockId::AIR
-                | BlockId::WATER
-                | BlockId::LEAVES
-                | BlockId::BIRCH_LEAVES
-                | BlockId::SPRUCE_LEAVES
-                | BlockId::TORCH
-                | BlockId::TALL_GRASS
-                | BlockId::FLOWER_RED
-                | BlockId::FLOWER_YELLOW
-                | BlockId::DEAD_BUSH
-        )
+        registry::block(self).has(registry::F_OPAQUE)
     }
 
     /// Whether placing a block here simply replaces what is already there.
-    /// Water and small plants give way, as they do in Minecraft; anything solid
-    /// does not. Without this the player cannot build in, on, or beside water,
-    /// which rules out most of a shoreline.
+    /// Water and small plants give way; anything solid does not. Without this
+    /// the player cannot build in, on, or beside water, which rules out most of
+    /// a shoreline. `replaceable` in `blocks.ron`.
     #[inline]
     pub fn is_replaceable(self) -> bool {
-        matches!(
-            self,
-            BlockId::AIR
-                | BlockId::WATER
-                | BlockId::TALL_GRASS
-                | BlockId::FLOWER_RED
-                | BlockId::FLOWER_YELLOW
-                | BlockId::DEAD_BUSH
-        )
+        registry::block(self).has(registry::F_REPLACEABLE)
     }
 
-    /// Whether the player collides with it.
+    /// Whether the player collides with it. `solid` in `blocks.ron`.
     #[inline]
     pub fn is_solid(self) -> bool {
-        !matches!(
-            self,
-            BlockId::AIR
-                | BlockId::WATER
-                | BlockId::TORCH
-                | BlockId::TALL_GRASS
-                | BlockId::FLOWER_RED
-                | BlockId::FLOWER_YELLOW
-                | BlockId::DEAD_BUSH
-        )
+        registry::block(self).has(registry::F_SOLID)
     }
 
-    /// True for the three grass-family surface blocks plus podzol, i.e. ground
-    /// a plant or a tree will root in.
+    /// True for the grass-family surface blocks plus podzol, i.e. ground a
+    /// plant or a tree will root in. The `"grassy"` tag in `blocks.ron`.
     #[inline]
     pub fn is_grassy(self) -> bool {
-        matches!(
-            self,
-            BlockId::GRASS
-                | BlockId::GRASS_COLD
-                | BlockId::GRASS_DRY
-                | BlockId::GRASS_SWAMP
-                | BlockId::PODZOL
-        )
+        registry::block(self).has(registry::F_GRASSY)
     }
 
-    /// True for any of the tree trunk variants.
+    /// True for any of the tree trunk variants. The `"log"` tag.
     #[inline]
     pub fn is_log(self) -> bool {
-        matches!(
-            self,
-            BlockId::WOOD | BlockId::BIRCH_LOG | BlockId::SPRUCE_LOG
-        )
+        registry::block(self).has(registry::F_LOG)
     }
 
-    /// True for any of the leaf variants.
+    /// True for any of the leaf variants. The `"leaves"` tag.
     #[inline]
     pub fn is_leaves(self) -> bool {
-        matches!(
-            self,
-            BlockId::LEAVES | BlockId::BIRCH_LEAVES | BlockId::SPRUCE_LEAVES
-        )
+        registry::block(self).has(registry::F_LEAVES)
     }
 
     /// How this block is built into geometry and which pass draws it.
@@ -200,19 +188,45 @@ impl BlockId {
     /// Ground cover is a cross of two quads rather than a cube -- a flower
     /// rendered as a full block is a slab of pink, which is what this replaces.
     /// Leaves stay cubes but are alpha-cut, and water is the only translucent
-    /// thing in the world.
+    /// thing in the world. `render` in `blocks.ron`.
     #[inline]
     pub fn render_kind(self) -> RenderKind {
-        match self {
-            BlockId::WATER => RenderKind::Water,
-            BlockId::LEAVES | BlockId::BIRCH_LEAVES | BlockId::SPRUCE_LEAVES => RenderKind::Cutout,
-            BlockId::TALL_GRASS
-            | BlockId::FLOWER_RED
-            | BlockId::FLOWER_YELLOW
-            | BlockId::DEAD_BUSH => RenderKind::Cross,
-            BlockId::TORCH => RenderKind::Post,
-            _ => RenderKind::Solid,
-        }
+        registry::block(self).render
+    }
+
+    /// Block light this emits by itself, 0..=15. `light` in `blocks.ron`.
+    ///
+    /// `light.rs` still keeps its own copy of this table; a test below fails if
+    /// the two ever disagree, and the copy should be deleted in favour of this.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn light_emission(self) -> u8 {
+        registry::block(self).light
+    }
+
+    /// How much light this eats as it passes through, 0..=15.
+    /// `light_opacity` in `blocks.ron`, defaulted from `opaque` and the
+    /// `"leaves"` tag. The counterpart of `light.rs`'s `opacity()`.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn light_opacity(self) -> u8 {
+        registry::block(self).light_opacity
+    }
+
+    /// The stable data-file name, e.g. `"crafting_table"`. `"?"` for an id no
+    /// data file defines.
+    #[allow(dead_code)]
+    pub fn name(self) -> &'static str {
+        registry::get()
+            .block(self)
+            .map_or("?", |d| d.name.as_str())
+    }
+
+    /// Look a block up by the name it carries in `blocks.ron`. This is how
+    /// content code should refer to blocks it did not get handed.
+    #[allow(dead_code)]
+    pub fn from_name(name: &str) -> Option<BlockId> {
+        registry::get().block_id(name)
     }
 
     /// True for the ground cover that draws as two crossed quads.
@@ -225,82 +239,18 @@ impl BlockId {
     /// atlas sample, not the whole story: almost every block now carries its
     /// colour in its texture and tints white. The values are kept because
     /// `item.rs`, `hud.rs` and the map/debug readouts all still ask for a
-    /// representative colour per block.
+    /// representative colour per block. `color` in `blocks.ron`; an id nothing
+    /// defines is magenta.
+    #[inline]
     pub fn color(self) -> [f32; 3] {
-        match self {
-            BlockId::STONE => [0.50, 0.50, 0.53],
-            BlockId::DIRT => [0.42, 0.30, 0.19],
-            BlockId::GRASS => [0.32, 0.58, 0.24],
-            BlockId::SAND => [0.83, 0.78, 0.55],
-            BlockId::WOOD => [0.38, 0.27, 0.16],
-            BlockId::LEAVES => [0.20, 0.45, 0.18],
-            BlockId::PLANKS => [0.63, 0.48, 0.29],
-            BlockId::COBBLESTONE => [0.42, 0.42, 0.44],
-            BlockId::COAL_ORE => [0.24, 0.24, 0.26],
-            BlockId::IRON_ORE => [0.71, 0.57, 0.45],
-            BlockId::GOLD_ORE => [0.85, 0.72, 0.24],
-            BlockId::DIAMOND_ORE => [0.36, 0.80, 0.82],
-            BlockId::BEDROCK => [0.15, 0.15, 0.17],
-            BlockId::WATER => [0.20, 0.40, 0.75],
-            BlockId::TORCH => [0.95, 0.78, 0.35],
-            BlockId::CRAFTING_TABLE => [0.55, 0.40, 0.24],
-            BlockId::FURNACE => [0.38, 0.38, 0.40],
-
-            BlockId::SANDSTONE => [0.76, 0.70, 0.49],
-            BlockId::GRAVEL => [0.48, 0.46, 0.45],
-            BlockId::CLAY => [0.61, 0.63, 0.67],
-            BlockId::SNOW => [0.93, 0.95, 0.98],
-            BlockId::ICE => [0.63, 0.79, 0.93],
-            BlockId::GRANITE => [0.60, 0.44, 0.38],
-            BlockId::DIORITE => [0.73, 0.73, 0.71],
-            BlockId::ANDESITE => [0.55, 0.57, 0.55],
-            BlockId::BIRCH_LOG => [0.82, 0.80, 0.72],
-            BlockId::BIRCH_LEAVES => [0.44, 0.61, 0.26],
-            BlockId::SPRUCE_LOG => [0.27, 0.19, 0.12],
-            BlockId::SPRUCE_LEAVES => [0.15, 0.32, 0.20],
-            BlockId::CACTUS => [0.27, 0.51, 0.23],
-            // Plants: near their host ground so a full-cube meadow reads as
-            // texture rather than as confetti.
-            BlockId::TALL_GRASS => [0.38, 0.63, 0.25],
-            BlockId::FLOWER_RED => [0.68, 0.31, 0.28],
-            BlockId::FLOWER_YELLOW => [0.80, 0.75, 0.32],
-            BlockId::DEAD_BUSH => [0.55, 0.44, 0.25],
-            BlockId::GRASS_COLD => [0.36, 0.52, 0.36],
-            BlockId::GRASS_DRY => [0.60, 0.62, 0.31],
-            BlockId::GRASS_SWAMP => [0.29, 0.42, 0.22],
-            BlockId::PODZOL => [0.35, 0.24, 0.12],
-
-            _ => [1.0, 0.0, 1.0], // missing-block magenta
-        }
+        registry::block(self).color
     }
 
-    /// Relative mining hardness. Higher is slower.
+    /// Relative mining hardness. Higher is slower, `f32::INFINITY` is
+    /// unbreakable. `hardness` in `blocks.ron`.
+    #[inline]
     pub fn hardness(self) -> f32 {
-        match self {
-            BlockId::BEDROCK => f32::INFINITY,
-            BlockId::STONE | BlockId::COBBLESTONE => 1.5,
-            BlockId::GRANITE | BlockId::DIORITE | BlockId::ANDESITE => 1.5,
-            BlockId::COAL_ORE | BlockId::IRON_ORE => 3.0,
-            BlockId::GOLD_ORE | BlockId::DIAMOND_ORE => 3.5,
-            BlockId::DIRT | BlockId::GRASS | BlockId::SAND => 0.6,
-            BlockId::GRASS_COLD | BlockId::GRASS_DRY | BlockId::GRASS_SWAMP => 0.6,
-            BlockId::PODZOL | BlockId::GRAVEL | BlockId::CLAY => 0.6,
-            BlockId::SANDSTONE => 0.9,
-            BlockId::SNOW => 0.15,
-            BlockId::ICE => 0.5,
-            BlockId::WOOD | BlockId::PLANKS => 2.0,
-            BlockId::BIRCH_LOG | BlockId::SPRUCE_LOG => 2.0,
-            BlockId::LEAVES | BlockId::BIRCH_LEAVES | BlockId::SPRUCE_LEAVES => 0.2,
-            BlockId::CACTUS => 0.4,
-            BlockId::TORCH => 0.1,
-            BlockId::TALL_GRASS
-            | BlockId::FLOWER_RED
-            | BlockId::FLOWER_YELLOW
-            | BlockId::DEAD_BUSH => 0.1,
-            BlockId::CRAFTING_TABLE => 2.5,
-            BlockId::FURNACE => 3.5,
-            _ => 1.0,
-        }
+        registry::block(self).hardness
     }
 }
 
@@ -334,6 +284,84 @@ mod tests {
         ];
         for (id, n) in frozen {
             assert_eq!(id.0, n, "block id {id:?} moved off its frozen number");
+        }
+    }
+
+    /// The constants above and `blocks.ron` are two spellings of one numbering.
+    /// If they drift, `BlockId::STONE` starts meaning something else while
+    /// every save file on disk keeps meaning what it always did.
+    #[test]
+    fn registry_ids_match_the_constants() {
+        let pairs: [(BlockId, &str); 39] = [
+            (BlockId::AIR, "air"),
+            (BlockId::STONE, "stone"),
+            (BlockId::DIRT, "dirt"),
+            (BlockId::GRASS, "grass"),
+            (BlockId::SAND, "sand"),
+            (BlockId::WOOD, "wood"),
+            (BlockId::LEAVES, "leaves"),
+            (BlockId::PLANKS, "planks"),
+            (BlockId::COBBLESTONE, "cobblestone"),
+            (BlockId::COAL_ORE, "coal_ore"),
+            (BlockId::IRON_ORE, "iron_ore"),
+            (BlockId::GOLD_ORE, "gold_ore"),
+            (BlockId::DIAMOND_ORE, "diamond_ore"),
+            (BlockId::BEDROCK, "bedrock"),
+            (BlockId::WATER, "water"),
+            (BlockId::TORCH, "torch"),
+            (BlockId::CRAFTING_TABLE, "crafting_table"),
+            (BlockId::FURNACE, "furnace"),
+            (BlockId::SANDSTONE, "sandstone"),
+            (BlockId::GRAVEL, "gravel"),
+            (BlockId::CLAY, "clay"),
+            (BlockId::SNOW, "snow"),
+            (BlockId::ICE, "ice"),
+            (BlockId::GRANITE, "granite"),
+            (BlockId::DIORITE, "diorite"),
+            (BlockId::ANDESITE, "andesite"),
+            (BlockId::BIRCH_LOG, "birch_log"),
+            (BlockId::BIRCH_LEAVES, "birch_leaves"),
+            (BlockId::SPRUCE_LOG, "spruce_log"),
+            (BlockId::SPRUCE_LEAVES, "spruce_leaves"),
+            (BlockId::CACTUS, "cactus"),
+            (BlockId::TALL_GRASS, "tall_grass"),
+            (BlockId::FLOWER_RED, "flower_red"),
+            (BlockId::FLOWER_YELLOW, "flower_yellow"),
+            (BlockId::DEAD_BUSH, "dead_bush"),
+            (BlockId::GRASS_COLD, "grass_cold"),
+            (BlockId::GRASS_DRY, "grass_dry"),
+            (BlockId::GRASS_SWAMP, "grass_swamp"),
+            (BlockId::PODZOL, "podzol"),
+        ];
+        for (id, name) in pairs {
+            assert_eq!(id.name(), name, "BlockId({}) is no longer {name}", id.0);
+            assert_eq!(
+                BlockId::from_name(name),
+                Some(id),
+                "\"{name}\" no longer resolves to {}",
+                id.0
+            );
+        }
+        // Nothing may be added above MAX without texture.rs learning about it.
+        assert_eq!(registry::get().max_block_id(), BlockId::MAX);
+    }
+
+    /// `light.rs` still owns a private copy of the emission and opacity
+    /// tables. Until it reads the registry instead, this catches the drift.
+    #[test]
+    fn the_light_tables_agree_with_the_registry() {
+        for n in 0..=BlockId::MAX {
+            let id = BlockId(n);
+            assert_eq!(
+                crate::light::emission(id),
+                id.light_emission(),
+                "block {n} emits a different amount of light in light.rs than in blocks.ron"
+            );
+            assert_eq!(
+                crate::light::opacity(id),
+                id.light_opacity(),
+                "block {n} eats a different amount of light in light.rs than in blocks.ron"
+            );
         }
     }
 

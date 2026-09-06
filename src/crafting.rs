@@ -9,6 +9,7 @@
 //! mirroring, so a pickaxe crafted in the right-hand columns still works.
 //! Shapeless recipes ignore position entirely.
 
+use crate::block::registry;
 use crate::inventory::ItemStack;
 use crate::item::ItemId;
 
@@ -17,167 +18,38 @@ pub const GRID_2X2: usize = 4;
 /// Slot count of the crafting table's 3x3 grid.
 pub const GRID_3X3: usize = 9;
 
-// Shorthand for the recipe table below. `EM` is an empty cell.
-const EM: Option<ItemId> = None;
-const PL: Option<ItemId> = Some(ItemId::PLANKS);
-const ST: Option<ItemId> = Some(ItemId::STICK);
-const CB: Option<ItemId> = Some(ItemId::COBBLESTONE);
-const IN: Option<ItemId> = Some(ItemId::IRON_INGOT);
-const CO: Option<ItemId> = Some(ItemId::COAL);
-
 /// How a recipe's ingredients are arranged.
-#[derive(Copy, Clone, Debug)]
+///
+/// Built by the registry from `assets/data/recipes.ron`, where a shaped recipe
+/// is drawn as rows of text with a character key.
+#[derive(Clone, Debug)]
 pub enum Pattern {
     /// Ingredients in any arrangement. The grid must hold exactly these items,
     /// one per occupied cell, and nothing else.
-    Shapeless(&'static [ItemId]),
+    Shapeless(Vec<ItemId>),
     /// A `width` x `height` block of cells that must appear somewhere in the
     /// grid, with every cell outside it empty.
     Shaped {
         width: usize,
         height: usize,
-        cells: &'static [Option<ItemId>],
+        cells: Vec<Option<ItemId>>,
     },
 }
 
 /// One craftable result.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Recipe {
     pub pattern: Pattern,
     pub output: ItemId,
     pub count: u8,
 }
 
-/// Every crafting recipe in the game. Order matters only in that the first
-/// match wins; no two recipes here can match the same grid.
-pub static RECIPES: &[Recipe] = &[
-    // --- basics ---
-    Recipe {
-        pattern: Pattern::Shapeless(&[ItemId::WOOD]),
-        output: ItemId::PLANKS,
-        count: 4,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 1,
-            height: 2,
-            cells: &[PL, PL],
-        },
-        output: ItemId::STICK,
-        count: 4,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 2,
-            height: 2,
-            cells: &[PL, PL, PL, PL],
-        },
-        output: ItemId::CRAFTING_TABLE,
-        count: 1,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 3,
-            height: 3,
-            cells: &[CB, CB, CB, CB, EM, CB, CB, CB, CB],
-        },
-        output: ItemId::FURNACE,
-        count: 1,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 1,
-            height: 2,
-            cells: &[CO, ST],
-        },
-        output: ItemId::TORCH,
-        count: 4,
-    },
-    // --- pickaxes: three across the top, two sticks down the middle ---
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 3,
-            height: 3,
-            cells: &[PL, PL, PL, EM, ST, EM, EM, ST, EM],
-        },
-        output: ItemId::WOODEN_PICKAXE,
-        count: 1,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 3,
-            height: 3,
-            cells: &[CB, CB, CB, EM, ST, EM, EM, ST, EM],
-        },
-        output: ItemId::STONE_PICKAXE,
-        count: 1,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 3,
-            height: 3,
-            cells: &[IN, IN, IN, EM, ST, EM, EM, ST, EM],
-        },
-        output: ItemId::IRON_PICKAXE,
-        count: 1,
-    },
-    // --- axes: an L of material with a stick shaft ---
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 2,
-            height: 3,
-            cells: &[PL, PL, PL, ST, EM, ST],
-        },
-        output: ItemId::WOODEN_AXE,
-        count: 1,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 2,
-            height: 3,
-            cells: &[CB, CB, CB, ST, EM, ST],
-        },
-        output: ItemId::STONE_AXE,
-        count: 1,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 2,
-            height: 3,
-            cells: &[IN, IN, IN, ST, EM, ST],
-        },
-        output: ItemId::IRON_AXE,
-        count: 1,
-    },
-    // --- swords: two material over one stick ---
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 1,
-            height: 3,
-            cells: &[PL, PL, ST],
-        },
-        output: ItemId::WOODEN_SWORD,
-        count: 1,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 1,
-            height: 3,
-            cells: &[CB, CB, ST],
-        },
-        output: ItemId::STONE_SWORD,
-        count: 1,
-    },
-    Recipe {
-        pattern: Pattern::Shaped {
-            width: 1,
-            height: 3,
-            cells: &[IN, IN, ST],
-        },
-        output: ItemId::IRON_SWORD,
-        count: 1,
-    },
-];
+/// Every crafting recipe in the game, in the order `recipes.ron` lists them.
+/// Order matters only in that the first match wins; no two recipes should be
+/// able to match the same grid.
+pub fn recipes() -> &'static [Recipe] {
+    registry::get().recipes()
+}
 
 /// Grid dimensions for a slice length, or `None` for a length that is not a
 /// supported grid.
@@ -196,7 +68,7 @@ pub fn resolve(grid: &[Option<ItemStack>]) -> Option<ItemStack> {
     if grid.iter().all(|c| c.is_none()) {
         return None;
     }
-    let recipe = RECIPES.iter().find(|r| matches_grid(r, grid, w, h))?;
+    let recipe = recipes().iter().find(|r| matches_grid(r, grid, w, h))?;
     Some(ItemStack::new(recipe.output, recipe.count))
 }
 
@@ -225,17 +97,17 @@ pub fn consume(grid: &mut [Option<ItemStack>]) {
 /// a single pass.
 pub fn recipe_for(grid: &[Option<ItemStack>]) -> Option<&'static Recipe> {
     let (w, h) = grid_dims(grid.len())?;
-    RECIPES.iter().find(|r| matches_grid(r, grid, w, h))
+    recipes().iter().find(|r| matches_grid(r, grid, w, h))
 }
 
 fn matches_grid(recipe: &Recipe, grid: &[Option<ItemStack>], w: usize, h: usize) -> bool {
-    match recipe.pattern {
+    match &recipe.pattern {
         Pattern::Shapeless(items) => matches_shapeless(grid, items),
         Pattern::Shaped {
             width,
             height,
             cells,
-        } => matches_shaped(grid, w, h, width, height, cells),
+        } => matches_shaped(grid, w, h, *width, *height, cells),
     }
 }
 
@@ -326,16 +198,15 @@ pub struct SmeltRecipe {
     pub seconds: f32,
 }
 
-/// Everything a furnace can smelt.
-pub static SMELTING: &[SmeltRecipe] = &[SmeltRecipe {
-    input: ItemId::RAW_IRON,
-    output: ItemId::IRON_INGOT,
-    seconds: 10.0,
-}];
+/// Everything a furnace can smelt, from the `smelting:` section of
+/// `recipes.ron`.
+pub fn smelting() -> &'static [SmeltRecipe] {
+    registry::get().smelting()
+}
 
 /// The smelting recipe for an input item, if it has one.
 pub fn smelt_recipe(input: ItemId) -> Option<&'static SmeltRecipe> {
-    SMELTING.iter().find(|r| r.input == input)
+    smelting().iter().find(|r| r.input == input)
 }
 
 /// What one of `input` smelts into.
@@ -344,15 +215,10 @@ pub fn smelt_result(input: ItemId) -> Option<ItemId> {
 }
 
 /// How many seconds of furnace burn one of this item provides, or `None` if it
-/// is not a fuel. Coal is the workhorse; wood burns because it must.
+/// is not a fuel. The `fuel:` field in `items.ron`; coal is the workhorse and
+/// wood burns because it must.
 pub fn fuel_seconds(item: ItemId) -> Option<f32> {
-    match item {
-        ItemId::COAL => Some(80.0),
-        ItemId::COAL_ORE => Some(80.0),
-        ItemId::WOOD | ItemId::PLANKS | ItemId::CRAFTING_TABLE => Some(15.0),
-        ItemId::STICK => Some(5.0),
-        _ => None,
-    }
+    item.fuel_seconds()
 }
 
 /// A placed furnace's three slots and its burn state. The caller ticks it with
@@ -462,6 +328,14 @@ impl Furnace {
 mod tests {
     use super::*;
 
+    // Shorthand for the grids below. `EM` is an empty cell.
+    const EM: Option<ItemId> = None;
+    const PL: Option<ItemId> = Some(ItemId::PLANKS);
+    const ST: Option<ItemId> = Some(ItemId::STICK);
+    const CB: Option<ItemId> = Some(ItemId::COBBLESTONE);
+    const IN: Option<ItemId> = Some(ItemId::IRON_INGOT);
+    const CO: Option<ItemId> = Some(ItemId::COAL);
+
     /// Build a 3x3 grid from item shorthand.
     fn g3(cells: [Option<ItemId>; 9]) -> Vec<Option<ItemStack>> {
         cells.iter().map(|c| c.map(ItemStack::one)).collect()
@@ -570,7 +444,42 @@ mod tests {
 
     #[test]
     fn the_table_holds_about_a_dozen_recipes() {
-        assert!(RECIPES.len() >= 12, "expected ~12 recipes, found {}", RECIPES.len());
+        let n = recipes().len();
+        assert!(n >= 12, "expected ~12 recipes, found {n}");
+    }
+
+    /// Every recipe the data file lists must be buildable from items that
+    /// exist. A typo in `recipes.ron` should never reach a player as a recipe
+    /// that silently never matches.
+    #[test]
+    fn every_recipe_names_items_that_exist() {
+        for r in recipes() {
+            assert!(r.output.is_valid(), "recipe makes an item that does not exist");
+            assert!(r.count > 0 && r.count <= 64);
+            match &r.pattern {
+                Pattern::Shapeless(items) => {
+                    assert!(!items.is_empty());
+                    for i in items {
+                        assert!(i.is_valid(), "{i:?} is not a real item");
+                    }
+                }
+                Pattern::Shaped {
+                    width,
+                    height,
+                    cells,
+                } => {
+                    assert_eq!(cells.len(), width * height);
+                    assert!(*width <= 3 && *height <= 3, "pattern will never fit a grid");
+                    for i in cells.iter().flatten() {
+                        assert!(i.is_valid(), "{i:?} is not a real item");
+                    }
+                }
+            }
+        }
+        for s in smelting() {
+            assert!(s.input.is_valid() && s.output.is_valid());
+            assert!(s.seconds > 0.0);
+        }
     }
 
     #[test]

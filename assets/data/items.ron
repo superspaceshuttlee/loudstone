@@ -1,0 +1,108 @@
+// Loudstone item table, and the tool tiers that gate mining.
+//
+// ---------------------------------------------------------------------------
+// IDS ARE FROZEN, and block items are doubly so: an item that places a block
+// MUST carry the same number as that block, because save files store raw item
+// numbers and the two tables are read against each other. Ids 1..=17 are block
+// items; everything else starts at 100. Append, never renumber.
+// ---------------------------------------------------------------------------
+//
+// TIERS
+//
+//   name        the key blocks.ron uses in `requires: Tier("...")`.
+//   rank        ordering. A tool harvests a block gated at rank <= its own.
+//   speed       how many times faster than bare hands, on a block its kind is
+//               effective against.
+//   durability  uses before the tool breaks.
+//   material    the item this tier is crafted from (for recipe books and the
+//               tier -> material lookup).
+//   color       fallback icon tint for tools of this tier.
+//
+// The three tier names below are also spelled as `ToolTier` variants in
+// `item.rs`, because `texture.rs` matches on them to pick an icon. Retuning
+// their numbers is pure data; adding a fourth tier needs one enum variant.
+//
+// ITEMS
+//
+//   id          u16, required, unique, frozen.
+//   name        unique lowercase key. Recipes refer to items by this.
+//   display     what the HUD shows.
+//   places      Some("<block name>") for a block item, else omitted. The block
+//               must have the same numeric id as this item.
+//   tool        Some((Pickaxe|Axe|Sword, "<tier name>")) for a tool.
+//   max_stack   defaults to 1 for tools and 64 for everything else.
+//   durability  defaults to the tier's durability; 0 for non-tools.
+//   attack      melee damage when swung. Defaults to 1.0, a bare fist.
+//   fuel        Some(seconds) if it burns in a furnace.
+//   color       icon tint. Block items default to their block's colour and
+//               tools to their tier's, so only loose items need one.
+//
+// Adding an item: append an entry, give it a tile in `texture.rs`, and add a
+// recipe in `recipes.ron` (or a `drops:` line in `blocks.ron`) so it can be
+// obtained.
+
+(
+    tiers: [
+        (name: "wood",  rank: 1, speed: 2.0, durability:  60, material: "planks",
+            color: [0.63, 0.48, 0.29]),
+        (name: "stone", rank: 2, speed: 4.0, durability: 132, material: "cobblestone",
+            color: [0.50, 0.50, 0.53]),
+        (name: "iron",  rank: 3, speed: 6.0, durability: 251, material: "iron_ingot",
+            color: [0.86, 0.86, 0.88]),
+    ],
+
+    items: [
+        // --- block items: same number as the block they place ---------------
+        (id:  1, name: "stone",          display: "Stone",          places: Some("stone")),
+        (id:  2, name: "dirt",           display: "Dirt",           places: Some("dirt")),
+        (id:  3, name: "grass",          display: "Grass Block",    places: Some("grass")),
+        (id:  4, name: "sand",           display: "Sand",           places: Some("sand")),
+        (id:  5, name: "wood",           display: "Wood",           places: Some("wood"),
+            fuel: Some(15.0)),
+        (id:  6, name: "leaves",         display: "Leaves",         places: Some("leaves")),
+        (id:  7, name: "planks",         display: "Planks",         places: Some("planks"),
+            fuel: Some(15.0)),
+        (id:  8, name: "cobblestone",    display: "Cobblestone",    places: Some("cobblestone")),
+        (id:  9, name: "coal_ore",       display: "Coal Ore",       places: Some("coal_ore"),
+            fuel: Some(80.0)),
+        (id: 10, name: "iron_ore",       display: "Iron Ore",       places: Some("iron_ore")),
+        (id: 11, name: "gold_ore",       display: "Gold Ore",       places: Some("gold_ore")),
+        (id: 12, name: "diamond_ore",    display: "Diamond Ore",    places: Some("diamond_ore")),
+        (id: 15, name: "torch",          display: "Torch",          places: Some("torch")),
+        (id: 16, name: "crafting_table", display: "Crafting Table", places: Some("crafting_table"),
+            fuel: Some(15.0)),
+        (id: 17, name: "furnace",        display: "Furnace",        places: Some("furnace")),
+
+        // --- loose items, from 100 -------------------------------------------
+        (id: 100, name: "stick",      display: "Stick",      color: Some([0.55, 0.40, 0.22]),
+            fuel: Some(5.0)),
+        (id: 101, name: "coal",       display: "Coal",       color: Some([0.14, 0.14, 0.16]),
+            fuel: Some(80.0)),
+        (id: 102, name: "raw_iron",   display: "Raw Iron",   color: Some([0.78, 0.64, 0.52])),
+        (id: 103, name: "iron_ingot", display: "Iron Ingot", color: Some([0.86, 0.86, 0.88])),
+
+        // --- tools -----------------------------------------------------------
+        // Pickaxes swing badly but are never a bare fist.
+        (id: 110, name: "wooden_pickaxe", display: "Wooden Pickaxe",
+            tool: Some((Pickaxe, "wood")),  attack: 2.0),
+        (id: 111, name: "stone_pickaxe",  display: "Stone Pickaxe",
+            tool: Some((Pickaxe, "stone")), attack: 2.0),
+        (id: 112, name: "iron_pickaxe",   display: "Iron Pickaxe",
+            tool: Some((Pickaxe, "iron")),  attack: 2.0),
+
+        (id: 120, name: "wooden_axe",     display: "Wooden Axe",
+            tool: Some((Axe, "wood")),      attack: 2.0),
+        (id: 121, name: "stone_axe",      display: "Stone Axe",
+            tool: Some((Axe, "stone")),     attack: 3.0),
+        (id: 122, name: "iron_axe",       display: "Iron Axe",
+            tool: Some((Axe, "iron")),      attack: 4.0),
+
+        // Swords are the point of swinging at all.
+        (id: 130, name: "wooden_sword",   display: "Wooden Sword",
+            tool: Some((Sword, "wood")),    attack: 4.0),
+        (id: 131, name: "stone_sword",    display: "Stone Sword",
+            tool: Some((Sword, "stone")),   attack: 6.0),
+        (id: 132, name: "iron_sword",     display: "Iron Sword",
+            tool: Some((Sword, "iron")),    attack: 8.0),
+    ],
+)

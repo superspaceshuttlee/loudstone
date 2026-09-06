@@ -1,12 +1,20 @@
 //! Item identities: what the player carries, what blocks drop, and the tool-tier
 //! table that gates mining.
 //!
+//! Like `block.rs`, this file is the API and not the content. Names, stack
+//! sizes, tool tiers, durability, damage, what each block drops and what tool
+//! it demands all come from `assets/data/items.ron` and `assets/data/blocks.ron`
+//! by way of [`crate::block::registry`]. The ids stay here, frozen, because
+//! save files and `match` patterns both need them at compile time.
+//!
 //! Numbering rule, and it matters because save files store raw ids: item ids
 //! `1..=17` are *block items* and share the exact numeric id of the block they
-//! place, so `ItemId(n).places() == BlockId(n)`. Non-block items start at 100.
-//! Never renumber an existing id; only append.
+//! place, so `ItemId(n).places() == BlockId(n)`. The registry refuses to load
+//! data that breaks that. Non-block items start at 100. Never renumber an
+//! existing id; only append.
 
 use crate::block::BlockId;
+use crate::block::registry;
 
 // --- block ids this module needs that `block.rs` does not define yet ---------
 //
@@ -26,14 +34,29 @@ pub const BLOCK_FURNACE: BlockId = BlockId(17);
 // --- tools -------------------------------------------------------------------
 
 /// What a tool is shaped like. Determines which blocks it speeds up.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+///
+/// Spelled in the data files as `tool: Pickaxe` and `Some((Axe, "iron"))`.
+/// This is an enum rather than data because `texture.rs` matches on it to pick
+/// an icon: the *set* of tool shapes is code, everything about them is data.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, serde::Deserialize)]
 pub enum ToolKind {
     Pickaxe,
     Axe,
     Sword,
 }
 
-/// Material tier of a tool. Ordering is meaningful: `Wood < Stone < Iron`.
+impl ToolKind {
+    /// Every tool shape, for exhaustive lookups.
+    pub const ALL: [ToolKind; 3] = [ToolKind::Pickaxe, ToolKind::Axe, ToolKind::Sword];
+}
+
+/// Material tier of a tool. Ordering is meaningful: `Wood < Stone < Iron`, and
+/// `can_harvest` gates on it, so the registry checks that the `rank` numbers in
+/// `items.ron` increase in this same order.
+///
+/// The names `"wood"`, `"stone"` and `"iron"` are what `items.ron` and
+/// `blocks.ron` refer to. Like [`ToolKind`], the set is code (because
+/// `texture.rs` matches on it) and the numbers are data.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum ToolTier {
     Wood,
@@ -42,40 +65,33 @@ pub enum ToolTier {
 }
 
 impl ToolTier {
+    /// Every tier, weakest first.
+    pub const ALL: [ToolTier; 3] = [ToolTier::Wood, ToolTier::Stone, ToolTier::Iron];
+
     /// Numeric rank, for gating comparisons.
     pub fn rank(self) -> u8 {
-        match self {
-            ToolTier::Wood => 1,
-            ToolTier::Stone => 2,
-            ToolTier::Iron => 3,
-        }
+        registry::get().tier(self).rank
     }
 
     /// How much faster this tier mines a block it is effective against.
     pub fn speed(self) -> f32 {
-        match self {
-            ToolTier::Wood => 2.0,
-            ToolTier::Stone => 4.0,
-            ToolTier::Iron => 6.0,
-        }
+        registry::get().tier(self).speed
     }
 
     /// Uses before the tool breaks.
     pub fn durability(self) -> u16 {
-        match self {
-            ToolTier::Wood => 60,
-            ToolTier::Stone => 132,
-            ToolTier::Iron => 251,
-        }
+        registry::get().tier(self).durability
     }
 
     /// The item this tier is crafted from.
     pub fn material(self) -> ItemId {
-        match self {
-            ToolTier::Wood => ItemId::PLANKS,
-            ToolTier::Stone => ItemId::COBBLESTONE,
-            ToolTier::Iron => ItemId::IRON_INGOT,
-        }
+        registry::get().tier(self).material
+    }
+
+    /// The name this tier goes by in the data files.
+    #[allow(dead_code)]
+    pub fn data_name(self) -> &'static str {
+        registry::get().tier(self).name.as_str()
     }
 }
 
@@ -121,7 +137,14 @@ impl ItemId {
     pub const STONE_SWORD: ItemId = ItemId(131);
     pub const IRON_SWORD: ItemId = ItemId(132);
 
-    /// Every item that exists, for UI listings and exhaustive tests.
+    /// Every item this *build* knows by name, for UI listings, the texture
+    /// atlas and exhaustive tests. It is a constant because `texture.rs`
+    /// iterates it to generate icons, and art is code.
+    ///
+    /// Items added purely in `items.ron` are absent from here but present
+    /// everywhere else -- `is_valid`, `name`, crafting -- and draw with the
+    /// missing-texture tile. Use [`crate::block::registry::Registry::item_ids`]
+    /// for everything the registry knows.
     pub const ALL: &'static [ItemId] = &[
         ItemId::STONE,
         ItemId::DIRT,
@@ -153,31 +176,17 @@ impl ItemId {
         ItemId::IRON_SWORD,
     ];
 
-    /// True if this id is one the game actually defines.
+    /// True if this id is one the loaded data actually defines. `save.rs` uses
+    /// it to reject a corrupt inventory.
     pub fn is_valid(self) -> bool {
-        ItemId::ALL.contains(&self)
+        registry::get().item(self).is_some()
     }
 
     /// The block this item places when right-clicked, if it places anything.
+    /// `places` in `items.ron`, which the registry checks carries the same
+    /// number as the block it names.
     pub fn places(self) -> Option<BlockId> {
-        match self {
-            ItemId::STONE
-            | ItemId::DIRT
-            | ItemId::GRASS
-            | ItemId::SAND
-            | ItemId::WOOD
-            | ItemId::LEAVES
-            | ItemId::PLANKS
-            | ItemId::COBBLESTONE
-            | ItemId::COAL_ORE
-            | ItemId::IRON_ORE
-            | ItemId::GOLD_ORE
-            | ItemId::DIAMOND_ORE
-            | ItemId::TORCH
-            | ItemId::CRAFTING_TABLE
-            | ItemId::FURNACE => Some(BlockId(self.0 as u8)),
-            _ => None,
-        }
+        registry::get().item(self).and_then(|d| d.places)
     }
 
     /// The item form of a block, for blocks that have one.
@@ -187,35 +196,16 @@ impl ItemId {
     }
 
     /// Tool kind and tier, or `None` for anything that is not a tool.
+    /// `tool: Some((Pickaxe, "iron"))` in `items.ron`.
     pub fn tool(self) -> Option<(ToolKind, ToolTier)> {
-        let out = match self {
-            ItemId::WOODEN_PICKAXE => (ToolKind::Pickaxe, ToolTier::Wood),
-            ItemId::STONE_PICKAXE => (ToolKind::Pickaxe, ToolTier::Stone),
-            ItemId::IRON_PICKAXE => (ToolKind::Pickaxe, ToolTier::Iron),
-            ItemId::WOODEN_AXE => (ToolKind::Axe, ToolTier::Wood),
-            ItemId::STONE_AXE => (ToolKind::Axe, ToolTier::Stone),
-            ItemId::IRON_AXE => (ToolKind::Axe, ToolTier::Iron),
-            ItemId::WOODEN_SWORD => (ToolKind::Sword, ToolTier::Wood),
-            ItemId::STONE_SWORD => (ToolKind::Sword, ToolTier::Stone),
-            ItemId::IRON_SWORD => (ToolKind::Sword, ToolTier::Iron),
-            _ => return None,
-        };
-        Some(out)
+        registry::get().item(self).and_then(|d| d.tool)
     }
 
-    /// The tool item for a kind and tier. Inverse of [`ItemId::tool`].
+    /// The tool item for a kind and tier. Inverse of [`ItemId::tool`]. The
+    /// registry refuses to load data that leaves a combination unfilled or
+    /// claimed twice, so this is always a real item.
     pub fn tool_item(kind: ToolKind, tier: ToolTier) -> ItemId {
-        match (kind, tier) {
-            (ToolKind::Pickaxe, ToolTier::Wood) => ItemId::WOODEN_PICKAXE,
-            (ToolKind::Pickaxe, ToolTier::Stone) => ItemId::STONE_PICKAXE,
-            (ToolKind::Pickaxe, ToolTier::Iron) => ItemId::IRON_PICKAXE,
-            (ToolKind::Axe, ToolTier::Wood) => ItemId::WOODEN_AXE,
-            (ToolKind::Axe, ToolTier::Stone) => ItemId::STONE_AXE,
-            (ToolKind::Axe, ToolTier::Iron) => ItemId::IRON_AXE,
-            (ToolKind::Sword, ToolTier::Wood) => ItemId::WOODEN_SWORD,
-            (ToolKind::Sword, ToolTier::Stone) => ItemId::STONE_SWORD,
-            (ToolKind::Sword, ToolTier::Iron) => ItemId::IRON_SWORD,
-        }
+        registry::get().tool_item(kind, tier)
     }
 
     /// True for tools, which never stack and carry durability.
@@ -223,82 +213,53 @@ impl ItemId {
         self.tool().is_some()
     }
 
-    /// How many of this item fit in one stack. Tools are always 1.
+    /// How many of this item fit in one stack. Tools are 1 unless `items.ron`
+    /// says otherwise.
     pub fn max_stack(self) -> u8 {
-        if self.is_tool() { 1 } else { MAX_STACK }
+        registry::get().item(self).map_or(MAX_STACK, |d| d.max_stack)
     }
 
     /// Full durability for a tool; 0 for everything else.
     pub fn max_durability(self) -> u16 {
-        match self.tool() {
-            Some((_, tier)) => tier.durability(),
-            None => 0,
-        }
+        registry::get().item(self).map_or(0, |d| d.durability)
     }
 
     /// Melee damage this item deals when swung. Swords are the point; everything
-    /// else is a fist with extra steps.
+    /// else is a fist with extra steps. `attack` in `items.ron`.
     pub fn attack_damage(self) -> f32 {
-        match self.tool() {
-            Some((ToolKind::Sword, tier)) => 2.0 + tier.rank() as f32 * 2.0,
-            Some((ToolKind::Axe, tier)) => 1.0 + tier.rank() as f32,
-            Some((ToolKind::Pickaxe, _)) => 2.0,
-            None => 1.0,
-        }
+        registry::get().item(self).map_or(1.0, |d| d.attack)
     }
 
     /// Display name for the hotbar and inventory UI.
     pub fn name(self) -> &'static str {
-        match self {
-            ItemId::STONE => "Stone",
-            ItemId::DIRT => "Dirt",
-            ItemId::GRASS => "Grass Block",
-            ItemId::SAND => "Sand",
-            ItemId::WOOD => "Wood",
-            ItemId::LEAVES => "Leaves",
-            ItemId::PLANKS => "Planks",
-            ItemId::COBBLESTONE => "Cobblestone",
-            ItemId::COAL_ORE => "Coal Ore",
-            ItemId::IRON_ORE => "Iron Ore",
-            ItemId::GOLD_ORE => "Gold Ore",
-            ItemId::DIAMOND_ORE => "Diamond Ore",
-            ItemId::TORCH => "Torch",
-            ItemId::CRAFTING_TABLE => "Crafting Table",
-            ItemId::FURNACE => "Furnace",
-            ItemId::STICK => "Stick",
-            ItemId::COAL => "Coal",
-            ItemId::RAW_IRON => "Raw Iron",
-            ItemId::IRON_INGOT => "Iron Ingot",
-            ItemId::WOODEN_PICKAXE => "Wooden Pickaxe",
-            ItemId::STONE_PICKAXE => "Stone Pickaxe",
-            ItemId::IRON_PICKAXE => "Iron Pickaxe",
-            ItemId::WOODEN_AXE => "Wooden Axe",
-            ItemId::STONE_AXE => "Stone Axe",
-            ItemId::IRON_AXE => "Iron Axe",
-            ItemId::WOODEN_SWORD => "Wooden Sword",
-            ItemId::STONE_SWORD => "Stone Sword",
-            ItemId::IRON_SWORD => "Iron Sword",
-            _ => "Unknown",
-        }
+        registry::get()
+            .item(self)
+            .map_or("Unknown", |d| d.display.as_str())
     }
 
-    /// Flat colour for the hotbar icon. Block items borrow their block's colour.
+    /// The stable data-file name, e.g. `"iron_ingot"`. Recipes refer to items
+    /// by this, never by number.
+    #[allow(dead_code)]
+    pub fn data_name(self) -> &'static str {
+        registry::get().item(self).map_or("?", |d| d.name.as_str())
+    }
+
+    /// Look an item up by the name it carries in `items.ron`.
+    #[allow(dead_code)]
+    pub fn from_name(name: &str) -> Option<ItemId> {
+        registry::get().item_id(name)
+    }
+
+    /// Flat colour for the hotbar icon. Block items borrow their block's colour
+    /// and tools their tier's, unless `items.ron` gives them one of their own.
     pub fn color(self) -> [f32; 3] {
-        match self.places() {
-            Some(b) => b.color(),
-            None => match self {
-                ItemId::STICK => [0.55, 0.40, 0.22],
-                ItemId::COAL => [0.14, 0.14, 0.16],
-                ItemId::RAW_IRON => [0.78, 0.64, 0.52],
-                ItemId::IRON_INGOT => [0.86, 0.86, 0.88],
-                _ => match self.tool() {
-                    Some((_, ToolTier::Wood)) => [0.63, 0.48, 0.29],
-                    Some((_, ToolTier::Stone)) => [0.50, 0.50, 0.53],
-                    Some((_, ToolTier::Iron)) => [0.86, 0.86, 0.88],
-                    None => [1.0, 0.0, 1.0],
-                },
-            },
-        }
+        registry::get().item(self).map_or([1.0, 0.0, 1.0], |d| d.color)
+    }
+
+    /// How many seconds of furnace burn one of this item is worth, or `None` if
+    /// it is not a fuel. `fuel` in `items.ron`.
+    pub fn fuel_seconds(self) -> Option<f32> {
+        registry::get().item(self).and_then(|d| d.fuel)
     }
 }
 
@@ -309,51 +270,34 @@ pub const MAX_STACK: u8 = 64;
 
 /// How a block responds to tools. This is the single place tool gating is
 /// decided; nothing else should hardcode a tier comparison.
+///
+/// Filled in from the `tool:` and `requires:` fields of `blocks.ron`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct HarvestRule {
     /// The tool kind that mines this block faster. `None` means no tool helps.
     pub effective: Option<ToolKind>,
     /// Minimum tool needed to get a drop at all. `None` means bare hands work.
     pub required: Option<(ToolKind, ToolTier)>,
+    /// False when nothing can ever harvest it -- air, water, bedrock.
+    /// `requires: Never` in the data.
+    pub harvestable: bool,
 }
 
 impl HarvestRule {
-    const fn free(effective: Option<ToolKind>) -> Self {
-        Self {
-            effective,
-            required: None,
-        }
-    }
-
-    const fn gated(kind: ToolKind, tier: ToolTier) -> Self {
-        Self {
-            effective: Some(kind),
-            required: Some((kind, tier)),
-        }
-    }
+    /// What an id no data file defines behaves like: mineable, tool-agnostic.
+    const UNKNOWN: HarvestRule = HarvestRule {
+        effective: None,
+        required: None,
+        harvestable: true,
+    };
 }
 
-/// THE tier table. Read it top to bottom to see exactly what each block demands.
+/// THE tier table, now read from `blocks.ron`. Open that file to see exactly
+/// what each block demands.
 pub fn harvest_rule(block: BlockId) -> HarvestRule {
-    use ToolKind::{Axe, Pickaxe, Sword};
-    use ToolTier::{Iron, Stone, Wood};
-    match block {
-        // Stone family: any pickaxe drops it, better pickaxes go faster.
-        BlockId::STONE | BlockId::COBBLESTONE => HarvestRule::gated(Pickaxe, Wood),
-        BlockId::COAL_ORE => HarvestRule::gated(Pickaxe, Wood),
-        // Iron needs stone tier or better.
-        BlockId::IRON_ORE => HarvestRule::gated(Pickaxe, Stone),
-        // Gold and diamond need iron tier.
-        BlockId::GOLD_ORE | BlockId::DIAMOND_ORE => HarvestRule::gated(Pickaxe, Iron),
-        // Crafted stone furniture behaves like stone.
-        BLOCK_FURNACE => HarvestRule::gated(Pickaxe, Wood),
-        // Wood family: an axe is faster but hands still work.
-        BlockId::WOOD | BlockId::PLANKS | BLOCK_CRAFTING_TABLE => HarvestRule::free(Some(Axe)),
-        // Leaves shear fastest with a sword.
-        BlockId::LEAVES => HarvestRule::free(Some(Sword)),
-        // Soft ground and torches: no tool matters.
-        _ => HarvestRule::free(None),
-    }
+    registry::get()
+        .block(block)
+        .map_or(HarvestRule::UNKNOWN, |d| d.harvest)
 }
 
 /// How much faster `tool` mines `block` than bare hands. Always >= 1.0.
@@ -375,13 +319,14 @@ pub fn mining_speed_multiplier(tool: Option<ItemId>, block: BlockId) -> f32 {
 /// Whether mining `block` with `tool` yields a drop.
 ///
 /// Breaking is always allowed (the block still disappears); this only decides
-/// whether the player gets anything for it. Bedrock, air and water are never
-/// harvestable regardless of tool.
+/// whether the player gets anything for it. Blocks marked `requires: Never` --
+/// air, water, bedrock -- are never harvestable regardless of tool.
 pub fn can_harvest(tool: Option<ItemId>, block: BlockId) -> bool {
-    if block.is_air() || block == BlockId::WATER || block == BlockId::BEDROCK {
+    let rule = harvest_rule(block);
+    if !rule.harvestable {
         return false;
     }
-    match harvest_rule(block).required {
+    match rule.required {
         None => true,
         Some((need_kind, need_tier)) => match tool.and_then(ItemId::tool) {
             Some((kind, tier)) => kind == need_kind && tier >= need_tier,
@@ -392,23 +337,12 @@ pub fn can_harvest(tool: Option<ItemId>, block: BlockId) -> bool {
 
 /// What `block` drops when mined with a tool that [`can_harvest`] it.
 ///
-/// Returns `None` for blocks that drop nothing. Callers must still check
-/// `can_harvest` first -- this function does not know what tool was used.
+/// The `drops:` field of `blocks.ron`: `Itself` (the default) gives the item
+/// that places the block, `Nothing` gives nothing, and `Item("coal")` names
+/// something else. Callers must still check `can_harvest` first -- this
+/// function does not know what tool was used.
 pub fn block_drop(block: BlockId) -> Option<ItemId> {
-    match block {
-        // Stone shatters into cobblestone.
-        BlockId::STONE => Some(ItemId::COBBLESTONE),
-        // Grass strips to plain dirt.
-        BlockId::GRASS => Some(ItemId::DIRT),
-        // Ores drop their raw material rather than the block.
-        BlockId::COAL_ORE => Some(ItemId::COAL),
-        BlockId::IRON_ORE => Some(ItemId::RAW_IRON),
-        // Leaves drop nothing; saplings are out of scope.
-        BlockId::LEAVES => None,
-        BlockId::AIR | BlockId::WATER | BlockId::BEDROCK => None,
-        // Everything else drops itself.
-        other => ItemId::from_block(other),
-    }
+    registry::get().block(block).and_then(|d| d.drop)
 }
 
 /// Convenience: the drop from mining `block` with `tool`, `None` if it yields
