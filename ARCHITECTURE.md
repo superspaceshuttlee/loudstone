@@ -6,6 +6,52 @@ it is a bug that has already been paid for once.
 
 ---
 
+## 0. If you are an AI assistant reading this without the repo
+
+This document describes a codebase living at `C:\Users\aavig\dev\loudstone` on
+the owner's machine. It is a **local git repository with no remote** — nothing is
+pushed to GitHub, so you cannot fetch it.
+
+That means: this file tells you what exists, how it fits together, and what will
+break if you change it carelessly — but **you cannot read or edit any source file
+unless the owner gives you access.** Do not guess at the contents of a file and
+propose a patch against it; ask for the file.
+
+Three ways to work, in increasing order of usefulness:
+
+1. **The owner pastes in the file(s) for the task.** Best for a focused change —
+   "make night darker" needs `config.rs` and `light.rs`, nothing else. Ask for
+   exactly what you need.
+2. **The owner pushes the repo to GitHub** (`git remote add origin ...`, then
+   `git push -u origin master`). Then an agentic coding tool connected to that
+   repo can read and edit it directly. This is the real answer if you are meant
+   to make changes rather than advise. It is 38 tracked files, under a megabyte.
+3. **The owner runs an agentic CLI locally** in that directory, which already has
+   filesystem access.
+
+Whatever you do, verify with `cargo test` (357 tests) and, for anything visual,
+`cargo run --release -- --shot shots/x.png` and actually look at the PNG.
+
+### Current state, as of the last commit
+
+Playable and complete for its scope: biomes, water, trees, caves, ores, lighting
+with a day/night cycle, mining, crafting, smelting, tool tiers, four mob kinds
+with sound-driven AI, saves, generated textures, and synthesised audio.
+
+Two pieces of work are **deliberately half-finished** and committed that way:
+
+- `src/registry.rs` and `assets/data/*.ron` exist, but block and item properties
+  are **still defined in Rust** in `block.rs` / `item.rs`. The registry is not yet
+  the source of truth. Finishing it is the single biggest unblock for adding
+  content quickly — see gap list at the end.
+- The save format gained mob and container sections (`INTEGRATION_saves.md`
+  describes them), but `main.rs` does **not** yet collect mobs or furnace
+  contents into `SaveData` before writing. So they still do not survive a reload.
+
+Both compile, all tests pass, and neither affects playing the game.
+
+---
+
 ## 1. What the game is
 
 A voxel survival game in Rust: mine, craft, build, fight, survive the night.
