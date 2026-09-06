@@ -339,6 +339,12 @@ pub struct Mob {
     pub yaw: f32,
     pub health: f32,
     pub on_ground: bool,
+    /// Horizontal distance actually travelled, in blocks. Renderers drive the
+    /// walk cycle from this rather than from a clock, so a mob shoving against
+    /// a wall stops striding instead of moonwalking on the spot.
+    pub gait: f32,
+    /// Held in place by the model review stand; skips physics.
+    pub pinned: bool,
     pub state: MobState,
     /// Where the mob is currently heading. In `Investigate` this is a sound position.
     pub target: Vec3,
@@ -368,6 +374,8 @@ impl Mob {
             yaw: 0.0,
             health: kind.stats().max_health,
             on_ground: false,
+            gait: 0.0,
+            pinned: false,
             state: MobState::Idle,
             target: pos,
             heard_loudness: 0.0,
@@ -494,11 +502,16 @@ fn resolve_axis<W: VoxelWorld + ?Sized>(
 
 /// Integrate one mob's velocity against the world. Returns `(hit_wall, landed_speed)`.
 fn step_physics<W: VoxelWorld + ?Sized>(world: &W, mob: &mut Mob, dt: f32) -> (bool, f32) {
+    if mob.pinned {
+        return (false, 0.0);
+    }
     let size = mob.size();
+    let was = mob.pos;
     mob.vel.y = (mob.vel.y + GRAVITY * dt).max(TERMINAL_VELOCITY);
 
     let hit_x = resolve_axis(world, &mut mob.pos, size, mob.vel.x * dt, 0);
     let hit_z = resolve_axis(world, &mut mob.pos, size, mob.vel.z * dt, 2);
+    mob.gait += ((mob.pos.x - was.x).powi(2) + (mob.pos.z - was.z).powi(2)).sqrt();
     if hit_x {
         mob.vel.x = 0.0;
     }
@@ -786,6 +799,27 @@ impl MobManager {
     }
 
     /// Place a mob explicitly. Returns its id.
+    /// Point a mob a given way and stop it thinking. Used by the model review
+    /// stand so the rig is judged in its rest pose rather than mid-stride.
+    pub fn face_and_freeze(&mut self, id: u32, yaw: f32) {
+        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+            m.yaw = yaw;
+            m.vel = Vec3::ZERO;
+            m.gait = 0.0;
+            m.state = MobState::Idle;
+        }
+        self.spawning_enabled = false;
+    }
+
+    /// Force a mob to a position and keep it there. Review-stand only.
+    pub fn pin(&mut self, id: u32, pos: Vec3) {
+        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+            m.pos = pos;
+            m.vel = Vec3::ZERO;
+            m.pinned = true;
+        }
+    }
+
     pub fn spawn(&mut self, kind: MobKind, pos: Vec3) -> u32 {
         let id = self.next_id;
         self.next_id += 1;

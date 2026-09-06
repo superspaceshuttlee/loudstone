@@ -449,6 +449,296 @@ pub fn atlas() -> &'static Atlas {
     ATLAS.get_or_init(build_atlas)
 }
 
+
+// ---------------------------------------------------------------------------
+// Mob skins
+// ---------------------------------------------------------------------------
+//
+// A mob is a handful of boxes, and everything that makes it read as a zombie
+// rather than a stack of crates lives in its *skin* -- a face on the front of
+// the head, a torn shirt on the torso, blood down one arm. So mobs do not get a
+// tile per part like blocks do; they get a 64x64 skin laid out exactly the way
+// Minecraft lays one out, and every box face samples its own rectangle of it.
+//
+// The skin sits in a reserved corner of the block atlas rather than a texture of
+// its own, so entities keep using the terrain pipeline and its single bind
+// group. The atlas has 256 tiles and blocks use 82, so there is room to spare.
+
+/// Top-left texel of the mob skin sheet inside the atlas.
+pub const SKIN_ORIGIN: (usize, usize) = (0, 192);
+/// Skins are the standard 64x64 sheet.
+pub const SKIN_SIZE: usize = 64;
+
+/// Which mob a skin belongs to. Ordered like `mob::MobKind::ALL`.
+pub const SKIN_ZOMBIE: usize = 0;
+pub const SKIN_SKELETON: usize = 1;
+pub const SKIN_CREEPER: usize = 2;
+pub const SKIN_PIG: usize = 3;
+pub const SKIN_COUNT: usize = 4;
+
+/// Where one skin sheet starts in the atlas. Four sheets sit side by side.
+pub fn skin_origin(skin: usize) -> (usize, usize) {
+    (SKIN_ORIGIN.0 + skin * SKIN_SIZE, SKIN_ORIGIN.1)
+}
+
+/// The six faces of a box in the mesher's face order (top, bottom, +Z, -Z, +X, -X),
+/// as texel rectangles inside a skin sheet.
+///
+/// This is Minecraft's box-UV layout: given the sheet coordinate `uv` and the box
+/// dimensions `(w, h, d)` in texels, the unwrapped faces sit in a fixed cross
+/// arrangement. Following it exactly means a skin drawn to Minecraft's template
+/// maps correctly with no per-face bookkeeping in the model file.
+pub fn box_face_rects(uv: (usize, usize), size: (usize, usize, usize)) -> [[usize; 4]; 6] {
+    let (u, v) = uv;
+    let (w, h, d) = size;
+    [
+        [u + d, v, w, d],                 // top
+        [u + d + w, v, w, d],             // bottom
+        [u + d + w + d, v + d, w, h],     // +Z, the back
+        [u + d, v + d, w, h],             // -Z, the face
+        [u, v + d, d, h],                 // +X
+        [u + d + w, v + d, d, h],         // -X
+    ]
+}
+
+/// Normalised atlas UV rect for a texel rect inside a skin sheet.
+pub fn skin_uv(skin: usize, rect: [usize; 4]) -> [f32; 4] {
+    let (ox, oy) = skin_origin(skin);
+    let e = 0.25;
+    [
+        ((ox + rect[0]) as f32 + e) / ATLAS_W as f32,
+        ((oy + rect[1]) as f32 + e) / ATLAS_H as f32,
+        ((ox + rect[0] + rect[2]) as f32 - e) / ATLAS_W as f32,
+        ((oy + rect[1] + rect[3]) as f32 - e) / ATLAS_H as f32,
+    ]
+}
+
+/// A 64x64 skin sheet being painted.
+struct Skin {
+    px: Vec<Rgba>,
+}
+
+impl Skin {
+    fn new() -> Self {
+        Skin { px: vec![[0, 0, 0, 0]; SKIN_SIZE * SKIN_SIZE] }
+    }
+    fn set(&mut self, x: usize, y: usize, c: Rgba) {
+        if x < SKIN_SIZE && y < SKIN_SIZE {
+            self.px[y * SKIN_SIZE + x] = c;
+        }
+    }
+    fn get(&self, x: usize, y: usize) -> Rgba {
+        self.px[y * SKIN_SIZE + x]
+    }
+    /// Fill a texel rectangle with a base colour plus per-texel noise, which is
+    /// what stops a flat box reading as plastic.
+    fn panel(&mut self, r: [usize; 4], base: Rgba, jitter: i32, seed: u32) {
+        for y in 0..r[3] {
+            for x in 0..r[2] {
+                let n = hash2(r[0] as u32 + x as u32, r[1] as u32 + y as u32, seed);
+                let d = ((n % 512) as i32 - 256) * jitter / 256;
+                self.set(r[0] + x, r[1] + y, shade_i(base, d));
+            }
+        }
+    }
+    /// Every face of a box, so no part of a skin is ever left transparent.
+    fn box_all(&mut self, uv: (usize, usize), size: (usize, usize, usize), c: Rgba, seed: u32) {
+        for r in box_face_rects(uv, size) {
+            self.panel(r, c, 26, seed);
+        }
+    }
+}
+
+/// Lighten or darken by a signed amount, for skin noise and shading.
+fn shade_i(c: Rgba, d: i32) -> Rgba {
+    [
+        (c[0] as i32 + d).clamp(0, 255) as u8,
+        (c[1] as i32 + d).clamp(0, 255) as u8,
+        (c[2] as i32 + d).clamp(0, 255) as u8,
+        c[3],
+    ]
+}
+
+fn hash2(x: u32, y: u32, seed: u32) -> u32 {
+    let mut h = x.wrapping_mul(0x9E37_79B9) ^ y.wrapping_mul(0x85EB_CA6B) ^ seed;
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2545_F491);
+    h ^= h >> 13;
+    h
+}
+
+/// The standard Minecraft humanoid layout, in texels.
+/// (uv origin, box size) per part, in the order the model file declares them.
+pub const HEAD_UV: (usize, usize) = (0, 0);
+pub const HEAD_SIZE: (usize, usize, usize) = (8, 8, 8);
+pub const BODY_UV: (usize, usize) = (16, 16);
+pub const BODY_SIZE: (usize, usize, usize) = (8, 12, 4);
+pub const ARM_R_UV: (usize, usize) = (40, 16);
+pub const ARM_L_UV: (usize, usize) = (32, 48);
+pub const ARM_SIZE: (usize, usize, usize) = (4, 12, 4);
+pub const LEG_R_UV: (usize, usize) = (0, 16);
+pub const LEG_L_UV: (usize, usize) = (16, 48);
+pub const LEG_SIZE: (usize, usize, usize) = (4, 12, 4);
+
+/// Paint one mob's skin sheet.
+fn paint_skin(which: usize, sk: &mut Skin) {
+    // Palettes chosen to sit beside the block atlas rather than shout over it.
+    let (skin_c, shirt_c, trouser_c, seed) = match which {
+        SKIN_ZOMBIE => ([0x4C, 0x7A, 0x3F, 255], [0x3A, 0x4E, 0x74, 255], [0x2E, 0x3A, 0x52, 255], 11),
+        SKIN_SKELETON => ([0xC8, 0xC8, 0xBE, 255], [0xB4, 0xB4, 0xAA, 255], [0xA8, 0xA8, 0x9E, 255], 23),
+        SKIN_CREEPER => ([0x4F, 0xB5, 0x45, 255], [0x45, 0xA0, 0x3C, 255], [0x3C, 0x8C, 0x34, 255], 37),
+        _ => ([0xE6, 0x9A, 0xA0, 255], [0xDD, 0x8E, 0x95, 255], [0xC9, 0x7B, 0x82, 255], 53),
+    };
+
+    sk.box_all(HEAD_UV, HEAD_SIZE, skin_c, seed);
+    sk.box_all(BODY_UV, BODY_SIZE, shirt_c, seed ^ 1);
+    sk.box_all(ARM_R_UV, ARM_SIZE, skin_c, seed ^ 2);
+    sk.box_all(ARM_L_UV, ARM_SIZE, skin_c, seed ^ 3);
+    sk.box_all(LEG_R_UV, LEG_SIZE, trouser_c, seed ^ 4);
+    sk.box_all(LEG_L_UV, LEG_SIZE, trouser_c, seed ^ 5);
+
+    // Darken the outer edge of every face. Adjacent limbs touch with no gap
+    // between them, so without this a mob reads as one undifferentiated column
+    // -- which is exactly how the first skeleton came out.
+    for (uv, size) in [
+        (HEAD_UV, HEAD_SIZE),
+        (BODY_UV, BODY_SIZE),
+        (ARM_R_UV, ARM_SIZE),
+        (ARM_L_UV, ARM_SIZE),
+        (LEG_R_UV, LEG_SIZE),
+        (LEG_L_UV, LEG_SIZE),
+    ] {
+        for r in box_face_rects(uv, size) {
+            for x in 0..r[2] {
+                for y in 0..r[3] {
+                    let edge = x == 0 || y == 0 || x + 1 == r[2] || y + 1 == r[3];
+                    if edge {
+                        let c = sk.get(r[0] + x, r[1] + y);
+                        sk.set(r[0] + x, r[1] + y, shade_i(c, -22));
+                    }
+                }
+            }
+        }
+    }
+
+    // Sleeves: the upper third of each arm belongs to the shirt.
+    for (uv, _) in [(ARM_R_UV, 0), (ARM_L_UV, 0)] {
+        for r in box_face_rects(uv, ARM_SIZE) {
+            if r[3] >= 12 {
+                sk.panel([r[0], r[1], r[2], 4], shirt_c, 20, seed);
+            }
+        }
+    }
+
+    // The face. This is the single thing that decides whether a mob reads as a
+    // character, so it is painted explicitly rather than left to noise.
+    let face = box_face_rects(HEAD_UV, HEAD_SIZE)[3];
+    let (fx, fy) = (face[0], face[1]);
+    let eye_dark: Rgba = [0x10, 0x14, 0x18, 255];
+    let eye_glow: Rgba = match which {
+        SKIN_ZOMBIE => [0x9E, 0xE8, 0x6A, 255],
+        SKIN_SKELETON => [0x30, 0x30, 0x30, 255],
+        SKIN_CREEPER => [0x0A, 0x0A, 0x0A, 255],
+        _ => [0x2A, 0x1C, 0x1C, 255],
+    };
+
+    if which == SKIN_CREEPER {
+        // The creeper's face is its whole identity: two square eyes and a
+        // frowning mouth, all hard-edged.
+        for (x, y) in [(1, 2), (2, 2), (1, 3), (2, 3), (5, 2), (6, 2), (5, 3), (6, 3)] {
+            sk.set(fx + x, fy + y, eye_glow);
+        }
+        for (x, y) in [
+            (3, 4), (4, 4), (3, 5), (4, 5), (2, 5), (5, 5),
+            (2, 6), (3, 6), (4, 6), (5, 6),
+        ] {
+            sk.set(fx + x, fy + y, eye_glow);
+        }
+    } else {
+        // Deep 2x2 sockets with a lit pupil. Single-texel eyes vanish at any
+        // real viewing distance -- the creeper reads from across a field and the
+        // others did not, and boldness was the entire difference.
+        for (ex, ey) in [(1usize, 2usize), (5, 2)] {
+            for dx in 0..2 {
+                for dy in 0..2 {
+                    sk.set(fx + ex + dx, fy + ey + dy, eye_dark);
+                }
+            }
+        }
+        sk.set(fx + 2, fy + 3, eye_glow);
+        sk.set(fx + 5, fy + 3, eye_glow);
+        // A brow line above the sockets gives the face a readable expression.
+        for x in 1..7 {
+            sk.set(fx + x, fy + 1, shade_i(skin_c, -50));
+        }
+        // Mouth: two texels tall so it survives mip-mapping.
+        for x in 2..6 {
+            sk.set(fx + x, fy + 5, shade_i(skin_c, -75));
+            sk.set(fx + x, fy + 6, shade_i(skin_c, -55));
+        }
+        if which == SKIN_ZOMBIE {
+            // A torn brow and a smear down one cheek: decay, drawn not modelled.
+            for x in 0..4 {
+                sk.set(fx + x, fy + 1, shade_i(skin_c, -40));
+            }
+            for y in 4..7 {
+                sk.set(fx + 6, fy + y, [0x6B, 0x2B, 0x24, 255]);
+            }
+        }
+    }
+
+    if which == SKIN_SKELETON {
+        // Ribs across the chest and hollow sockets: bone, drawn not modelled.
+        let front = box_face_rects(BODY_UV, BODY_SIZE)[3];
+        for row in 0..4 {
+            let y = front[1] + 2 + row * 2;
+            for x in 1..(front[2] - 1) {
+                sk.set(front[0] + x, y, shade_i(shirt_c, -55));
+            }
+        }
+        for r in [box_face_rects(ARM_R_UV, ARM_SIZE)[3], box_face_rects(ARM_L_UV, ARM_SIZE)[3]] {
+            for y in 0..r[3] {
+                sk.set(r[0] + 1, r[1] + y, shade_i(skin_c, -45));
+                sk.set(r[0] + r[2] - 2, r[1] + y, shade_i(skin_c, -45));
+            }
+        }
+    }
+
+    // Blood and grime on the shirt front, for the zombie only.
+    if which == SKIN_ZOMBIE {
+        let front = box_face_rects(BODY_UV, BODY_SIZE)[3];
+        for i in 0..14u32 {
+            let n = hash2(i, 7, seed);
+            let x = (n % front[2] as u32) as usize;
+            let y = ((n >> 8) % front[3] as u32) as usize;
+            sk.set(front[0] + x, front[1] + y, [0x63, 0x24, 0x20, 255]);
+        }
+    }
+}
+
+/// All four skins, painted once and reused.
+fn paint_skins_into(px: &mut [u8]) {
+    for which in 0..SKIN_COUNT {
+        let mut sk = Skin::new();
+        paint_skin(which, &mut sk);
+        let (ox, oy) = skin_origin(which);
+        for y in 0..SKIN_SIZE {
+            for x in 0..SKIN_SIZE {
+                let c = sk.get(x, y);
+                if c[3] == 0 {
+                    continue;
+                }
+                let (ax, ay) = (ox + x, oy + y);
+                if ax >= ATLAS_W || ay >= ATLAS_H {
+                    continue;
+                }
+                let i = (ay * ATLAS_W + ax) * 4;
+                px[i..i + 4].copy_from_slice(&c);
+            }
+        }
+    }
+}
+
 fn build_atlas() -> Atlas {
     let mut px = vec![0u8; ATLAS_W * ATLAS_H * 4];
     for t in 0..TILE_COUNT {
@@ -463,6 +753,8 @@ fn build_atlas() -> Atlas {
             }
         }
     }
+
+    paint_skins_into(&mut px);
 
     let mut levels = vec![(ATLAS_W as u32, ATLAS_H as u32, px)];
     for _ in 1..MIP_LEVELS {
@@ -2116,6 +2408,10 @@ mod tests {
                 }
             }
         }
+        // The atlas is tiles *and* the mob skin sheets, so a faithful rebuild
+        // has to paint both. Comparing tiles alone would only prove that the
+        // skins exist, not that anything is reproducible.
+        paint_skins_into(&mut a);
         assert_eq!(a, atlas().levels[0].2, "atlas generation is not stable");
     }
 

@@ -122,39 +122,52 @@ fn sky_for(daylight: f32) -> [f32; 3] {
 /// A hunched, asymmetrical grave-roamer built from articulated low-poly parts.
 /// It deliberately avoids the familiar square-shirt humanoid silhouette: the
 /// shoulders are uneven, the jaw projects, and its long arms lead its gait.
-fn append_zombie_model(
+/// Draw one mob as a posed humanoid.
+///
+/// Every mob shares the same six-box rig and differs only by skin and a couple
+/// of pose flags. That is deliberate: in this art style, character comes from
+/// the texture, and giving each kind its own geometry is what made an earlier
+/// attempt look like it belonged to a different game.
+fn append_mob_model(
     verts: &mut Vec<mesh::Vertex>,
     indices: &mut Vec<u32>,
-    zombie: &mob::Mob,
-    time: f32,
+    m: &mob::Mob,
+    light: f32,
 ) {
-    let speed = Vec3::new(zombie.vel.x, 0.0, zombie.vel.z).length();
-    let motion = (speed * 0.9).clamp(0.08, 1.0);
-    let phase = time * (4.5 + speed * 1.8) + zombie.id as f32 * 1.73;
-    let stride = phase.sin() * 0.34 * motion;
-    let bob = (phase * 2.0).sin().abs() * 0.025 * motion;
+    let kind_index = mob::MobKind::ALL.iter().position(|k| *k == m.kind).unwrap_or(0);
+    let speed = Vec3::new(m.vel.x, 0.0, m.vel.z).length();
+
+    let pose = model::Pose {
+        // Driving the gait by distance travelled rather than by a clock is what
+        // stops the legs cycling while the mob is stuck against a wall.
+        stride: m.gait * 6.0,
+        speed: (speed / 4.0).clamp(0.0, 1.0),
+        head_yaw: 0.0,
+        head_pitch: 0.0,
+        attack: 0.0,
+        arms_forward: if m.kind == mob::MobKind::Zombie { 1.0 } else { 0.0 },
+        waddle: m.kind == mob::MobKind::Creeper || m.kind == mob::MobKind::Pig,
+    };
+
+    // A pig is a humanoid on all fours in this rig: shorter and tipped forward.
+    let scale = match m.kind {
+        mob::MobKind::Pig => 0.8,
+        _ => 1.0,
+    };
 
     model::append(
-        model::zombie(),
+        model::humanoid(),
+        kind_index,
         verts,
         indices,
-        zombie.pos + Vec3::Y * bob,
-        zombie.yaw,
-        |channel| model::PartPose {
-            bend: match channel {
-                Some("left_leg") => stride,
-                Some("left_boot") => stride * 0.8,
-                Some("right_leg") => -stride * 0.72,
-                Some("right_boot") => -stride * 0.58,
-                Some("left_arm") | Some("left_hand") => 0.82 - stride * 0.45,
-                Some("right_arm") | Some("right_hand") => 0.36 + stride * 0.28,
-                Some("head") => phase.sin() * 0.025,
-                _ => 0.0,
-            },
-            offset: Vec3::ZERO,
-        },
+        m.pos,
+        m.yaw,
+        scale,
+        &pose,
+        light,
     );
 }
+
 // ---------------------------------------------------------------------------
 
 /// Which on-screen panel has focus. The cursor is only released for a panel.
@@ -326,6 +339,8 @@ struct App {
     /// `--demo`: carve a crater and spawn one of each mob before capturing, so
     /// the two headline mechanics can be verified in a still frame.
     demo: bool,
+    /// `--models`: a review stand showing every mob together.
+    models_review: bool,
     /// `--ui table` / `--ui furnace`: open that panel before capturing.
     ui_demo: Option<String>,
     /// `--model zombie`: stage one model close to the camera for visual QA.
@@ -445,6 +460,7 @@ impl App {
                 .nth(1)
                 .map(std::path::PathBuf::from),
             demo: std::env::args().any(|a| a == "--demo"),
+            models_review: std::env::args().any(|a| a == "--models"),
             ui_demo: std::env::args().skip_while(|a| a != "--ui").nth(1),
             model_demo: std::env::args().skip_while(|a| a != "--model").nth(1),
             gauntlet: std::env::args().any(|a| a == "--gauntlet").then(|| {
@@ -760,6 +776,46 @@ impl App {
         true
     }
 
+    /// A model review stand: flat ground, even light, one of every mob in a row
+    /// at reading distance, facing the camera.
+    ///
+    /// Judging a character alone on a hillside is the hardest possible way to
+    /// tell whether it fits the world. This puts them all in one frame, in
+    /// context, so the question can be answered in a glance.
+    fn run_model_review(&mut self) {
+        let base = self.player.pos;
+        let gy = self.world.surface_y(base.x as i32, base.z as i32);
+        let fwd = Vec3::new(self.camera.yaw.cos(), 0.0, self.camera.yaw.sin());
+        let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+
+        // A clean stone platform, so nothing behind the models competes.
+        for d in -3..14 {
+            for w in -8..9 {
+                let p = base + fwd * d as f32 + right * w as f32;
+                let (x, z) = (p.x.floor() as i32, p.z.floor() as i32);
+                for y in (gy - 2)..=(gy + 6) {
+                    let id = if y <= gy { BlockId::STONE } else { BlockId::AIR };
+                    self.world.set_block(x, y, z, id);
+                }
+            }
+        }
+
+        let stand = base + fwd * 4.2;
+        for (i, kind) in MobKind::ALL.iter().enumerate() {
+            let off = (i as f32 - 1.5) * 1.7;
+            let p = stand + right * off;
+            let m = self.mobs.spawn(*kind, Vec3::new(p.x, gy as f32 + 1.0, p.z));
+            // Face the camera and hold still, so the rig is judged in its rest
+            // pose and nothing wanders toward the lens before the shutter.
+            self.mobs.face_and_freeze(m, self.camera.yaw + std::f32::consts::PI);
+            self.mobs.pin(m, Vec3::new(p.x, gy as f32 + 1.0, p.z));
+        }
+        self.player.pos = Vec3::new(base.x, gy as f32 + 1.0, base.z);
+        self.camera.pos = self.player.eye();
+        self.camera.pitch = -0.05;
+        println!("[loudstone] model review: 4 mobs on a platform");
+    }
+
     /// Stage the two headline mechanics in front of the camera so a single
     /// captured frame shows both: a chipped crater, and mobs standing near it.
     fn run_demo(&mut self) {
@@ -801,7 +857,7 @@ impl App {
 
         // One of each mob, arranged across the view.
         for (i, kind) in MobKind::ALL.iter().enumerate() {
-            let off = (i as f32 - 1.5) * 2.4;
+            let off = (i as f32 - 1.5) * 1.7;
             let side = Vec3::new(-fwd.z, 0.0, fwd.x) * off;
             let p = eye + fwd * 11.0 + side;
             let y = self.world.surface_y(p.x as i32, p.z as i32) as f32 + 1.0;
@@ -1289,48 +1345,24 @@ impl App {
         let daylight = daylight_at(self.time_of_day);
         let sky = sky_for(daylight);
 
-        // Entity geometry is rebuilt into growable buffers each frame. The
-        // zombie is the first articulated model; the remaining creatures keep
-        // their compact placeholder geometry until their own model pass.
+        // Entity geometry is rebuilt into growable buffers each frame. Every
+        // mob now uses the same six-box humanoid rig and differs only by skin,
+        // so adding a creature costs a palette and a pose flag, not geometry.
         let mut verts = Vec::new();
         let mut indices = Vec::new();
-        let model_time = self.start.elapsed().as_secs_f32();
         for m in self.mobs.mobs() {
-            if m.kind == MobKind::Zombie {
-                append_zombie_model(&mut verts, &mut indices, m, model_time);
-                continue;
-            }
-            let size = m.kind.size();
-            let half = size.x * 0.5;
-            let min = Vec3::new(m.pos.x - half, m.pos.y, m.pos.z - half);
-            let max = Vec3::new(m.pos.x + half, m.pos.y + size.y, m.pos.z + half);
-            let kind_index = MobKind::ALL.iter().position(|k| *k == m.kind).unwrap_or(3);
-            let (face_tile, head_tile, body_tile) = texture::mob_tiles(kind_index);
-            gfx::Renderer::box_geometry(
-                &mut verts,
-                &mut indices,
-                min,
-                max,
-                [1.0, 1.0, 1.0],
-                body_tile,
+            // Mobs take the light of the block they stand in, so one in a cave
+            // is not lit like one in a field.
+            let l = self.world.effective_light_at(
+                m.pos.x.floor() as i32,
+                (m.pos.y + 1.0).floor() as i32,
+                m.pos.z.floor() as i32,
+                daylight,
             );
-            let _ = face_tile;
-
-            // A darker head cube marks facing without needing a model.
-            let hs = size.x * 0.34;
-            let f = Vec3::new(m.yaw.cos(), 0.0, m.yaw.sin()) * (half * 0.7);
-            let hc = Vec3::new(m.pos.x, m.pos.y + size.y * 0.86, m.pos.z) + f;
-            let c = m.kind.color();
-            gfx::Renderer::box_geometry(
-                &mut verts,
-                &mut indices,
-                hc - Vec3::splat(hs),
-                hc + Vec3::splat(hs),
-                [1.0, 1.0, 1.0],
-                head_tile,
-            );
-            let _ = c;
+            let light = light::brightness(l as f32).max(0.12);
+            append_mob_model(&mut verts, &mut indices, m, light);
         }
+
         for p in self.mobs.projectiles() {
             gfx::Renderer::box_geometry(
                 &mut verts,
@@ -2086,6 +2118,9 @@ impl ApplicationHandler for App {
                     if self.ui == Ui::Title || !self.loading {
                         self.shot_countdown -= 1;
                         if self.shot_countdown == 60 {
+                            if self.models_review {
+                                self.run_model_review();
+                            }
                             if self.demo {
                                 self.run_demo();
                             }
