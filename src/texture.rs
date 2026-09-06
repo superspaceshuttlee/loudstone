@@ -580,6 +580,19 @@ pub const LEG_R_UV: (usize, usize) = (0, 16);
 pub const LEG_L_UV: (usize, usize) = (16, 48);
 pub const LEG_SIZE: (usize, usize, usize) = (4, 12, 4);
 
+// A four-legged mob unwraps to completely different rectangles from a humanoid:
+// a 10x8x16 barrel needs a 52x24 patch, which does not remotely fit where an
+// 8x12x4 torso lives. Pointing the pig's body at the humanoid `BODY_UV` ran its
+// unwrap off the end of that rectangle and into the arm and leg regions, so it
+// was literally wearing scraps of other limbs. Each mob owns its own 64x64
+// sheet, so a quadruped simply gets its own arrangement of it.
+pub const QUAD_HEAD_UV: (usize, usize) = (0, 0);
+pub const QUAD_HEAD_SIZE: (usize, usize, usize) = (8, 8, 8);
+pub const QUAD_BODY_UV: (usize, usize) = (0, 16);
+pub const QUAD_BODY_SIZE: (usize, usize, usize) = (10, 8, 16);
+pub const QUAD_LEG_UV: (usize, usize) = (0, 44);
+pub const QUAD_LEG_SIZE: (usize, usize, usize) = (4, 8, 4);
+
 /// Paint one mob's skin sheet.
 fn paint_skin(which: usize, sk: &mut Skin) {
     // Palettes chosen to sit beside the block atlas rather than shout over it.
@@ -589,6 +602,11 @@ fn paint_skin(which: usize, sk: &mut Skin) {
         SKIN_CREEPER => ([0x4F, 0xB5, 0x45, 255], [0x45, 0xA0, 0x3C, 255], [0x3C, 0x8C, 0x34, 255], 37),
         _ => ([0xE6, 0x9A, 0xA0, 255], [0xDD, 0x8E, 0x95, 255], [0xC9, 0x7B, 0x82, 255], 53),
     };
+
+    if which == SKIN_PIG {
+        paint_quadruped(sk, skin_c, shirt_c, seed);
+        return;
+    }
 
     sk.box_all(HEAD_UV, HEAD_SIZE, skin_c, seed);
     sk.box_all(BODY_UV, BODY_SIZE, shirt_c, seed ^ 1);
@@ -657,35 +675,25 @@ fn paint_skin(which: usize, sk: &mut Skin) {
             sk.set(fx + x, fy + y, eye_glow);
         }
     } else {
-        // Deep 2x2 sockets with a lit pupil. Single-texel eyes vanish at any
-        // real viewing distance -- the creeper reads from across a field and the
-        // others did not, and boldness was the entire difference.
-        for (ex, ey) in [(1usize, 2usize), (5, 2)] {
+        // An 8x8 face has room for about three marks. Sockets, a pupil in each,
+        // and a short mouth -- that is the whole budget. A previous version also
+        // painted a brow line and a decay smear and the result was mush at any
+        // distance, because every extra mark competes with the eyes.
+        for (ex, ey) in [(1usize, 3usize), (5, 3)] {
             for dx in 0..2 {
-                for dy in 0..2 {
-                    sk.set(fx + ex + dx, fy + ey + dy, eye_dark);
-                }
+                sk.set(fx + ex + dx, fy + ey, eye_dark);
+                sk.set(fx + ex + dx, fy + ey + 1, eye_dark);
             }
         }
         sk.set(fx + 2, fy + 3, eye_glow);
         sk.set(fx + 5, fy + 3, eye_glow);
-        // A brow line above the sockets gives the face a readable expression.
-        for x in 1..7 {
-            sk.set(fx + x, fy + 1, shade_i(skin_c, -50));
-        }
-        // Mouth: two texels tall so it survives mip-mapping.
-        for x in 2..6 {
-            sk.set(fx + x, fy + 5, shade_i(skin_c, -75));
-            sk.set(fx + x, fy + 6, shade_i(skin_c, -55));
+        for x in 3..5 {
+            sk.set(fx + x, fy + 6, shade_i(skin_c, -70));
         }
         if which == SKIN_ZOMBIE {
-            // A torn brow and a smear down one cheek: decay, drawn not modelled.
-            for x in 0..4 {
-                sk.set(fx + x, fy + 1, shade_i(skin_c, -40));
-            }
-            for y in 4..7 {
-                sk.set(fx + 6, fy + y, [0x6B, 0x2B, 0x24, 255]);
-            }
+            // One stain, low and to one side, where it cannot crowd the eyes.
+            sk.set(fx + 6, fy + 5, [0x6B, 0x2B, 0x24, 255]);
+            sk.set(fx + 6, fy + 6, [0x5A, 0x24, 0x1E, 255]);
         }
     }
 
@@ -719,18 +727,6 @@ fn paint_skin(which: usize, sk: &mut Skin) {
         }
     }
 
-    // A snout for the pig, on the front of the head.
-    if which == SKIN_PIG {
-        let f = box_face_rects(HEAD_UV, HEAD_SIZE)[3];
-        for x in 2..6 {
-            for y in 4..7 {
-                sk.set(f[0] + x, f[1] + y, shade_i(skin_c, 18));
-            }
-        }
-        sk.set(f[0] + 3, f[1] + 5, [0x6B, 0x43, 0x48, 255]);
-        sk.set(f[0] + 4, f[1] + 5, [0x6B, 0x43, 0x48, 255]);
-    }
-
     // Blood and grime on the shirt front, for the zombie only.
     if which == SKIN_ZOMBIE {
         let front = box_face_rects(BODY_UV, BODY_SIZE)[3];
@@ -741,6 +737,50 @@ fn paint_skin(which: usize, sk: &mut Skin) {
             sk.set(front[0] + x, front[1] + y, [0x63, 0x24, 0x20, 255]);
         }
     }
+}
+
+/// A four-legged skin: barrel, head with a snout, four feet.
+fn paint_quadruped(sk: &mut Skin, hide: Rgba, belly: Rgba, seed: u32) {
+    sk.box_all(QUAD_HEAD_UV, QUAD_HEAD_SIZE, hide, seed);
+    sk.box_all(QUAD_BODY_UV, QUAD_BODY_SIZE, hide, seed ^ 1);
+    sk.box_all(QUAD_LEG_UV, QUAD_LEG_SIZE, belly, seed ^ 2);
+
+    // The underside is paler, as on a real animal, and it is the one cue that
+    // reads the body as a barrel rather than a slab.
+    let under = box_face_rects(QUAD_BODY_UV, QUAD_BODY_SIZE)[1];
+    sk.panel(under, shade_i(hide, 26), 14, seed ^ 3);
+
+    for (uv, size) in [
+        (QUAD_HEAD_UV, QUAD_HEAD_SIZE),
+        (QUAD_BODY_UV, QUAD_BODY_SIZE),
+        (QUAD_LEG_UV, QUAD_LEG_SIZE),
+    ] {
+        for r in box_face_rects(uv, size) {
+            for x in 0..r[2] {
+                for y in 0..r[3] {
+                    if x == 0 || y == 0 || x + 1 == r[2] || y + 1 == r[3] {
+                        let c = sk.get(r[0] + x, r[1] + y);
+                        sk.set(r[0] + x, r[1] + y, shade_i(c, -20));
+                    }
+                }
+            }
+        }
+    }
+
+    // Face: two eyes and a snout with nostrils, on the head's front.
+    let f = box_face_rects(QUAD_HEAD_UV, QUAD_HEAD_SIZE)[3];
+    let dark: Rgba = [0x24, 0x16, 0x1A, 255];
+    for (ex, ey) in [(1usize, 2usize), (6, 2)] {
+        sk.set(f[0] + ex, f[1] + ey, dark);
+    }
+    let snout = shade_i(hide, 22);
+    for x in 2..6 {
+        for y in 4..7 {
+            sk.set(f[0] + x, f[1] + y, snout);
+        }
+    }
+    sk.set(f[0] + 3, f[1] + 5, dark);
+    sk.set(f[0] + 4, f[1] + 5, dark);
 }
 
 /// All four skins, painted once and reused.

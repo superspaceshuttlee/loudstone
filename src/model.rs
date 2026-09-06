@@ -106,44 +106,44 @@ pub fn quadruped() -> &'static [Part] {
     const PARTS: [Part; 6] = [
         Part {
             channel: Channel::Head,
-            uv: HEAD_UV,
-            size: HEAD_SIZE,
+            uv: QUAD_HEAD_UV,
+            size: QUAD_HEAD_SIZE,
             offset: (0.0, 12.0, -10.0),
             pivot: (0.0, 12.0, -8.0),
         },
         Part {
             channel: Channel::Body,
-            uv: BODY_UV,
-            size: (10, 8, 16),
+            uv: QUAD_BODY_UV,
+            size: QUAD_BODY_SIZE,
             offset: (0.0, 12.0, 0.0),
             pivot: (0.0, 12.0, 0.0),
         },
         // Front pair, driven by the arm channels so they swing with the gait.
         Part {
             channel: Channel::ArmRight,
-            uv: LEG_R_UV,
-            size: (4, 8, 4),
+            uv: QUAD_LEG_UV,
+            size: QUAD_LEG_SIZE,
             offset: (-3.0, 4.0, -5.0),
             pivot: (-3.0, 8.0, -5.0),
         },
         Part {
             channel: Channel::ArmLeft,
-            uv: LEG_L_UV,
-            size: (4, 8, 4),
+            uv: QUAD_LEG_UV,
+            size: QUAD_LEG_SIZE,
             offset: (3.0, 4.0, -5.0),
             pivot: (3.0, 8.0, -5.0),
         },
         Part {
             channel: Channel::LegRight,
-            uv: LEG_R_UV,
-            size: (4, 8, 4),
+            uv: QUAD_LEG_UV,
+            size: QUAD_LEG_SIZE,
             offset: (-3.0, 4.0, 5.0),
             pivot: (-3.0, 8.0, 5.0),
         },
         Part {
             channel: Channel::LegLeft,
-            uv: LEG_L_UV,
-            size: (4, 8, 4),
+            uv: QUAD_LEG_UV,
+            size: QUAD_LEG_SIZE,
             offset: (3.0, 4.0, 5.0),
             pivot: (3.0, 8.0, 5.0),
         },
@@ -393,6 +393,27 @@ mod tests {
             pointed.z < -0.9,
             "a raised arm should point along -Z, the model's front; got {pointed:?}"
         );
+    }
+
+    /// Every part's unwrap must fit inside the 64x64 skin sheet. The pig's body
+    /// originally borrowed the humanoid torso rectangle, and a 10x8x16 barrel
+    /// does not fit where an 8x12x4 torso lives -- it ran into the arm and leg
+    /// regions and wore them.
+    #[test]
+    fn every_part_unwraps_inside_its_sheet() {
+        for (name, parts) in [("humanoid", humanoid()), ("quadruped", quadruped())] {
+            for p in parts {
+                for r in texture::box_face_rects(p.uv, p.size) {
+                    assert!(
+                        r[0] + r[2] <= texture::SKIN_SIZE && r[1] + r[3] <= texture::SKIN_SIZE,
+                        "{name} part {:?} unwraps to {r:?}, off a {}x{} sheet",
+                        p.channel,
+                        texture::SKIN_SIZE,
+                        texture::SKIN_SIZE
+                    );
+                }
+            }
+        }
     }
 
     #[test]
