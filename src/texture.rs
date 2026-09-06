@@ -636,7 +636,9 @@ fn paint_skin(which: usize, sk: &mut Skin) {
     let (fx, fy) = (face[0], face[1]);
     let eye_dark: Rgba = [0x10, 0x14, 0x18, 255];
     let eye_glow: Rgba = match which {
-        SKIN_ZOMBIE => [0x9E, 0xE8, 0x6A, 255],
+        // Pale, not green. Light-green pupils on a green head have no contrast
+        // at all, which is why this face did not read while the creeper's did.
+        SKIN_ZOMBIE => [0xF2, 0xF6, 0xD8, 255],
         SKIN_SKELETON => [0x30, 0x30, 0x30, 255],
         SKIN_CREEPER => [0x0A, 0x0A, 0x0A, 255],
         _ => [0x2A, 0x1C, 0x1C, 255],
@@ -702,6 +704,31 @@ fn paint_skin(which: usize, sk: &mut Skin) {
                 sk.set(r[0] + r[2] - 2, r[1] + y, shade_i(skin_c, -45));
             }
         }
+    }
+
+    // Legs touch with no gap between them, so at any distance a pair reads as
+    // one wide slab. Darkening the inner edge of each is how the silhouette
+    // gets its centre line back.
+    for (uv, inner_on_right) in [(LEG_R_UV, true), (LEG_L_UV, false)] {
+        for r in box_face_rects(uv, LEG_SIZE) {
+            for y in 0..r[3] {
+                let x = if inner_on_right { r[2] - 1 } else { 0 };
+                let c = sk.get(r[0] + x, r[1] + y);
+                sk.set(r[0] + x, r[1] + y, shade_i(c, -45));
+            }
+        }
+    }
+
+    // A snout for the pig, on the front of the head.
+    if which == SKIN_PIG {
+        let f = box_face_rects(HEAD_UV, HEAD_SIZE)[3];
+        for x in 2..6 {
+            for y in 4..7 {
+                sk.set(f[0] + x, f[1] + y, shade_i(skin_c, 18));
+            }
+        }
+        sk.set(f[0] + 3, f[1] + 5, [0x6B, 0x43, 0x48, 255]);
+        sk.set(f[0] + 4, f[1] + 5, [0x6B, 0x43, 0x48, 255]);
     }
 
     // Blood and grime on the shirt front, for the zombie only.

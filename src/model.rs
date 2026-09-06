@@ -98,6 +98,59 @@ pub fn humanoid() -> &'static [Part] {
     &PARTS
 }
 
+/// A four-legged body: a horizontal barrel, a head at the front, four short
+/// legs. Shares the skin sheet layout with the humanoid so one painter serves
+/// both -- the torso rectangle simply wraps a longer box.
+pub fn quadruped() -> &'static [Part] {
+    use texture::*;
+    const PARTS: [Part; 6] = [
+        Part {
+            channel: Channel::Head,
+            uv: HEAD_UV,
+            size: HEAD_SIZE,
+            offset: (0.0, 12.0, -10.0),
+            pivot: (0.0, 12.0, -8.0),
+        },
+        Part {
+            channel: Channel::Body,
+            uv: BODY_UV,
+            size: (10, 8, 16),
+            offset: (0.0, 12.0, 0.0),
+            pivot: (0.0, 12.0, 0.0),
+        },
+        // Front pair, driven by the arm channels so they swing with the gait.
+        Part {
+            channel: Channel::ArmRight,
+            uv: LEG_R_UV,
+            size: (4, 8, 4),
+            offset: (-3.0, 4.0, -5.0),
+            pivot: (-3.0, 8.0, -5.0),
+        },
+        Part {
+            channel: Channel::ArmLeft,
+            uv: LEG_L_UV,
+            size: (4, 8, 4),
+            offset: (3.0, 4.0, -5.0),
+            pivot: (3.0, 8.0, -5.0),
+        },
+        Part {
+            channel: Channel::LegRight,
+            uv: LEG_R_UV,
+            size: (4, 8, 4),
+            offset: (-3.0, 4.0, 5.0),
+            pivot: (-3.0, 8.0, 5.0),
+        },
+        Part {
+            channel: Channel::LegLeft,
+            uv: LEG_L_UV,
+            size: (4, 8, 4),
+            offset: (3.0, 4.0, 5.0),
+            pivot: (3.0, 8.0, 5.0),
+        },
+    ];
+    &PARTS
+}
+
 /// How a mob is standing this frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pose {
@@ -115,6 +168,8 @@ pub struct Pose {
     pub arms_forward: f32,
     /// Creeper-style: no limb swing, a waddle instead.
     pub waddle: bool,
+    /// Four-legged, so the arm channels drive front legs rather than arms.
+    pub on_all_fours: bool,
 }
 
 /// Euler rotation for one part, in radians.
@@ -127,12 +182,20 @@ fn part_rotation(ch: Channel, p: &Pose) -> Vec3 {
         Channel::Body => Vec3::ZERO,
         Channel::ArmRight | Channel::ArmLeft => {
             let side = if ch == Channel::ArmRight { 1.0 } else { -1.0 };
+            if p.on_all_fours {
+                // A front leg is a leg: it swings, it does not reach.
+                return Vec3::new(swing * -side, 0.0, 0.0);
+            }
             if p.waddle {
                 return Vec3::ZERO;
             }
             // Zombie arms are held forward; the swing rides on top of that, and
             // an attack throws them down and back up.
-            let forward = -std::f32::consts::FRAC_PI_2 * p.arms_forward;
+            //
+            // The sign matters and is easy to get backwards: a hanging arm
+            // points (0,-1,0), and rotating that about +X by -90 degrees sends
+            // it to +Z, which is the model's BACK. Forward is +90.
+            let forward = std::f32::consts::FRAC_PI_2 * p.arms_forward;
             let x = forward - swing * side * 0.6 * (1.0 - p.arms_forward * 0.7)
                 - p.attack * 1.2;
             // A slight outward splay stops the arms clipping the torso.
@@ -140,12 +203,22 @@ fn part_rotation(ch: Channel, p: &Pose) -> Vec3 {
         }
         Channel::LegRight | Channel::LegLeft => {
             let side = if ch == Channel::LegRight { 1.0 } else { -1.0 };
-            if p.waddle {
+            if p.waddle && !p.on_all_fours {
                 return Vec3::new(0.0, 0.0, side * 0.12 * p.speed);
             }
             Vec3::new(swing * side, 0.0, 0.0)
         }
     }
+}
+
+/// World rotation for a mob at `yaw`.
+///
+/// A model is built with its front on -Z, but a mob's yaw is measured with 0
+/// pointing along +X. This is the one place that gap is bridged, and it is
+/// asserted directly in the tests rather than inferred from how a silhouette
+/// looks, because reasoning about the sign by eye got it wrong three times.
+fn body_rotation(yaw: f32) -> Mat3 {
+    Mat3::from_rotation_y(-yaw - std::f32::consts::FRAC_PI_2)
 }
 
 /// Append a posed model to an entity mesh.
@@ -164,7 +237,12 @@ pub fn append(
     pose: &Pose,
     light: f32,
 ) {
-    let body = Mat3::from_rotation_y(-yaw);
+    // A mob's yaw is measured with 0 pointing along +X, but a model's front
+    // face is its -Z side. Rotating by -yaw alone therefore leaves every
+    // creature standing a quarter turn off: none of them face the way they are
+    // walking, and a zombie's forward-held arms stick out sideways. The extra
+    // quarter turn maps model-forward onto mob-forward.
+    let body = body_rotation(yaw);
     for part in parts {
         let rot = part_rotation(part.channel, pose);
         let local = Mat3::from_rotation_y(rot.y) * Mat3::from_rotation_x(rot.x)
@@ -283,9 +361,52 @@ mod tests {
         let z = Pose { arms_forward: 1.0, ..Default::default() };
         let arm = part_rotation(Channel::ArmRight, &z).x;
         assert!(
-            (arm + std::f32::consts::FRAC_PI_2).abs() < 0.2,
-            "zombie arms should sit near -90 degrees, got {arm}"
+            (arm - std::f32::consts::FRAC_PI_2).abs() < 0.2,
+            "zombie arms should sit near +90 degrees, which is forward, got {arm}"
         );
+    }
+
+    #[test]
+    fn a_model_faces_the_way_its_yaw_points() {
+        // The model's front is -Z. A mob at yaw t faces (cos t, 0, sin t).
+        // Rotating the front by the body matrix must land exactly there.
+        for deg in [0.0f32, 90.0, 180.0, 270.0] {
+            let yaw = deg.to_radians();
+            let front = body_rotation(yaw) * Vec3::new(0.0, 0.0, -1.0);
+            let want = Vec3::new(yaw.cos(), 0.0, yaw.sin());
+            assert!(
+                (front - want).length() < 1.0e-5,
+                "at yaw {deg} the model faces {front:?} but the mob faces {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn forward_held_arms_point_the_way_the_model_faces() {
+        // Arms held forward must end up on the same side as the face, not out
+        // the back. Both are -Z in model space, so they have to agree.
+        let z = Pose { arms_forward: 1.0, ..Default::default() };
+        let rot = part_rotation(Channel::ArmRight, &z);
+        let hanging = Vec3::new(0.0, -1.0, 0.0);
+        let pointed = Mat3::from_rotation_x(rot.x) * hanging;
+        assert!(
+            pointed.z < -0.9,
+            "a raised arm should point along -Z, the model's front; got {pointed:?}"
+        );
+    }
+
+    #[test]
+    fn a_quadruped_has_four_legs_on_the_ground() {
+        let parts = quadruped();
+        let legs = parts
+            .iter()
+            .filter(|p| !matches!(p.channel, Channel::Head | Channel::Body))
+            .count();
+        assert_eq!(legs, 4);
+        for p in parts.iter().filter(|p| !matches!(p.channel, Channel::Head | Channel::Body)) {
+            let bottom = p.offset.1 - p.size.1 as f32 * 0.5;
+            assert!(bottom.abs() < 0.01, "a leg should reach the ground, got {bottom}");
+        }
     }
 
     #[test]

@@ -972,6 +972,12 @@ impl MobManager {
         dt: f32,
         repath_left: &mut usize,
     ) {
+        // A pinned mob is being photographed, not simulated. Skipping physics
+        // alone was not enough: the state machine kept re-steering its yaw every
+        // frame, so the review stand quietly turned every model back around.
+        if self.mobs[idx].pinned {
+            return;
+        }
         let mut mob = self.mobs[idx].clone();
         let stats = mob.kind.stats();
 

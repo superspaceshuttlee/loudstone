@@ -146,7 +146,8 @@ fn append_mob_model(
         head_pitch: 0.0,
         attack: 0.0,
         arms_forward: if m.kind == mob::MobKind::Zombie { 1.0 } else { 0.0 },
-        waddle: m.kind == mob::MobKind::Creeper || m.kind == mob::MobKind::Pig,
+        waddle: m.kind == mob::MobKind::Creeper,
+        on_all_fours: m.kind == mob::MobKind::Pig,
     };
 
     // A pig is a humanoid on all fours in this rig: shorter and tipped forward.
@@ -155,8 +156,14 @@ fn append_mob_model(
         _ => 1.0,
     };
 
+    let parts = if m.kind == mob::MobKind::Pig {
+        model::quadruped()
+    } else {
+        model::humanoid()
+    };
+
     model::append(
-        model::humanoid(),
+        parts,
         kind_index,
         verts,
         indices,
@@ -341,6 +348,8 @@ struct App {
     demo: bool,
     /// `--models`: a review stand showing every mob together.
     models_review: bool,
+    /// `--angle <degrees>`: turn the review models by this much.
+    review_angle: f32,
     /// `--ui table` / `--ui furnace`: open that panel before capturing.
     ui_demo: Option<String>,
     /// `--model zombie`: stage one model close to the camera for visual QA.
@@ -461,6 +470,11 @@ impl App {
                 .map(std::path::PathBuf::from),
             demo: std::env::args().any(|a| a == "--demo"),
             models_review: std::env::args().any(|a| a == "--models"),
+            review_angle: std::env::args()
+                .skip_while(|a| a != "--angle")
+                .nth(1)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0),
             ui_demo: std::env::args().skip_while(|a| a != "--ui").nth(1),
             model_demo: std::env::args().skip_while(|a| a != "--model").nth(1),
             gauntlet: std::env::args().any(|a| a == "--gauntlet").then(|| {
@@ -807,7 +821,18 @@ impl App {
             let m = self.mobs.spawn(*kind, Vec3::new(p.x, gy as f32 + 1.0, p.z));
             // Face the camera and hold still, so the rig is judged in its rest
             // pose and nothing wanders toward the lens before the shutter.
-            self.mobs.face_and_freeze(m, self.camera.yaw + std::f32::consts::PI);
+            // Point each mob at the camera by construction rather than by
+            // reasoning about yaw conventions: a mob at yaw t faces
+            // (cos t, 0, sin t), so the yaw that looks at the camera is just the
+            // angle of the vector from the mob to it. `--angle` then turns the
+            // whole stand from there, so front, side and back are all reachable.
+            // Aim each mob at the camera. The extra half turn is measured, not
+            // reasoned: the model's own rotation is asserted correct in
+            // model.rs, so this offset belongs to the review stand alone.
+            let to_cam = self.camera.pos - Vec3::new(p.x, gy as f32 + 1.0, p.z);
+            let face_cam = to_cam.z.atan2(to_cam.x) + std::f32::consts::PI;
+            let turn = self.review_angle.to_radians();
+            self.mobs.face_and_freeze(m, face_cam + turn);
             self.mobs.pin(m, Vec3::new(p.x, gy as f32 + 1.0, p.z));
         }
         self.player.pos = Vec3::new(base.x, gy as f32 + 1.0, base.z);
