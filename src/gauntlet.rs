@@ -76,8 +76,14 @@ pub struct Probe {
     pub inventory_total: u32,
     /// A stack over its limit, or present with a count of zero.
     pub inventory_bad: bool,
-    /// Streaming has nothing left to do.
+    /// Chunk streaming has nothing left to do. Deliberately ignores sky-light
+    /// repainting, which is busy for seconds after every dawn and dusk and is
+    /// not a streaming hang.
     pub world_idle: bool,
+    /// Chunks still queued for a sky-light remesh, for diagnosis only.
+    pub relight_pending: usize,
+    /// Generate-queued, generating, mesh-queued, meshing. Diagnosis only.
+    pub queues: (usize, usize, usize, usize),
     /// 0 playing, 1 inventory, 2 table, 3 furnace.
     pub panel: u8,
     // Monotonic counters.
@@ -322,7 +328,13 @@ impl Harness {
         }
         if self.still_for > STREAM_HANG_SECONDS && !p.world_idle {
             self.fail(format!(
-                "world still streaming after {STREAM_HANG_SECONDS:.0}s of standing still"
+                "chunk streaming still busy after {STREAM_HANG_SECONDS:.0}s of standing still:                  {} resident, gen {}/{}, mesh {}/{}, relight {}",
+                p.chunks,
+                p.queues.0,
+                p.queues.1,
+                p.queues.2,
+                p.queues.3,
+                p.relight_pending
             ));
             self.still_for = 0.0;
         }
@@ -641,7 +653,7 @@ mod tests {
         assert!(
             h.findings
                 .iter()
-                .any(|f| f.what.contains("still streaming"))
+                .any(|f| f.what.contains("chunk streaming still busy"))
         );
     }
 
@@ -653,7 +665,7 @@ mod tests {
         assert!(
             !h.findings
                 .iter()
-                .any(|f| f.what.contains("still streaming"))
+                .any(|f| f.what.contains("chunk streaming still busy"))
         );
     }
 

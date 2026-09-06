@@ -837,13 +837,45 @@ impl World {
         out
     }
 
-    /// True when everything the streamer wanted is generated, meshed and uploaded.
+    /// True when everything the streamer wanted is generated, meshed and uploaded
+    /// **and** the sky light has finished repainting. This is the "the world has
+    /// completely settled" question, which is what the loading screen wants.
     pub fn is_idle(&self) -> bool {
+        self.streaming_idle() && self.relight_queue.is_empty()
+    }
+
+    /// True when chunk streaming has nothing left to do, regardless of whether
+    /// the sky light is still repainting.
+    ///
+    /// These are two different questions and conflating them made the test
+    /// harness cry wolf. Every time the sky-subtract level changes, every
+    /// resident chunk -- around two thousand of them -- is queued for a remesh
+    /// and drained at [`RELIGHT_CHUNKS_PER_FRAME`] a frame, so the relight queue
+    /// is legitimately busy for seconds after each dawn and dusk. A watchdog
+    /// looking for a hung *streamer* must not count that as a hang, or it reports
+    /// a streaming failure every sunset and teaches you to ignore it.
+    pub fn streaming_idle(&self) -> bool {
         self.gen_queue.is_empty()
             && self.generating.is_empty()
             && self.mesh_queue.is_empty()
             && self.meshing.is_empty()
-            && self.relight_queue.is_empty()
+    }
+
+    /// Chunks still waiting to be remeshed for a sky-light change.
+    pub fn relight_pending(&self) -> usize {
+        self.relight_queue.len()
+    }
+
+    /// Queue depths, in the order generate-queued, generating, mesh-queued,
+    /// meshing. Only for diagnostics: a watchdog that says "streaming is stuck"
+    /// without saying *which* queue is stuck costs an afternoon to act on.
+    pub fn queue_depths(&self) -> (usize, usize, usize, usize) {
+        (
+            self.gen_queue.len(),
+            self.generating.len(),
+            self.mesh_queue.len(),
+            self.meshing.len(),
+        )
     }
 
     /// Feed a few chunks per frame back into the mesher after the sky subtract

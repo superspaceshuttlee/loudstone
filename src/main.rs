@@ -282,6 +282,71 @@ fn capture_live_state(
     }
 }
 
+/// Forget every furnace in this region whose block is no longer there, and hand
+/// back whatever those furnaces were holding.
+///
+/// A furnace's contents live in a position-keyed map, not in the block itself,
+/// so destroying the block leaves the map entry behind. Left alone that orphan
+/// is written out by every autosave, restored on load, and then silently adopted
+/// by the next furnace placed on the same coordinates -- handing the player back
+/// everything the old one held, as often as they care to repeat it. The save
+/// file also grows forever, one dead furnace at a time.
+///
+/// It takes a *region* and a block lookup rather than a single position because a
+/// furnace can also stop existing by being blown up, and a creeper's blast is
+/// nowhere near the code that knows what a container is. The region is not
+/// decoration: a bare "check every furnace" sweep would delete furnaces sitting
+/// in unloaded chunks, where `block_at` answers from raw terrain and so can never
+/// say FURNACE.
+/// Simulated seconds per frame during a gauntlet session. A fixed step is what
+/// makes a run a pure function of its seed; 1/60 matches how the game actually
+/// plays, so the physics and timers the robot exercises behave as a player's do.
+const GAUNTLET_STEP: f32 = 1.0 / 60.0;
+
+/// The `--gauntlet` run seed, if this is a gauntlet run at all. An unseeded run
+/// picks one from the clock so a failure found by chance can still be replayed.
+fn gauntlet_run_seed() -> Option<u64> {
+    if !std::env::args().any(|a| a == "--gauntlet") {
+        return None;
+    }
+    Some(
+        std::env::args()
+            .skip_while(|a| a != "--seed")
+            .nth(1)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(1)
+            }),
+    )
+}
+
+fn forget_orphan_furnaces(
+    furnaces: &mut HashMap<save::BlockPos, crafting::Furnace>,
+    lo: save::BlockPos,
+    hi: save::BlockPos,
+    block_at: impl Fn(i32, i32, i32) -> BlockId,
+) -> Vec<ItemStack> {
+    let mut salvaged = Vec::new();
+    furnaces.retain(|&(x, y, z), furnace| {
+        let inside = (lo.0..=hi.0).contains(&x)
+            && (lo.1..=hi.1).contains(&y)
+            && (lo.2..=hi.2).contains(&z);
+        if !inside || block_at(x, y, z) == BlockId::FURNACE {
+            return true;
+        }
+        salvaged.extend(
+            [furnace.input, furnace.fuel, furnace.output]
+                .into_iter()
+                .flatten(),
+        );
+        false
+    });
+    salvaged
+}
+
 fn replay_arrived_chunks(
     data: &mut save::SaveData,
     world: &mut World,
@@ -372,6 +437,8 @@ struct App {
     time_of_day: f32,
     spawn: Vec3,
     last_frame: Instant,
+    /// Wall clock at the previous rendered frame, for the real-time `dt`.
+    last_frame_at: Instant,
     fps: f32,
     fps_accum: f32,
     fps_frames: u32,
@@ -386,7 +453,29 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let save_path = save::default_save_path();
+        // The gauntlet gets its own world and its own save file.
+        //
+        // It used to load whatever save happened to be on disk, which broke it
+        // in two ways at once. It was not reproducible -- `--seed N` seeds only
+        // the robot's choices, so the same seed replayed in whatever world the
+        // player last left behind, and "reproduce with --seed 7" was a promise
+        // the harness could not keep. And it was destructive: the robot mines,
+        // smashes, places and autosaves, so running the test suite quietly
+        // rearranged the world the player was actually playing in.
+        //
+        // Deriving the world seed from the run seed makes a session a pure
+        // function of `--seed`, which is the whole point of a replayable harness.
+        let gauntlet_seed = gauntlet_run_seed();
+        let save_path = match gauntlet_seed {
+            Some(_) => std::env::temp_dir().join("loudstone_gauntlet_world.lsw"),
+            None => save::default_save_path(),
+        };
+        if let Some(seed) = gauntlet_seed {
+            // Start from bare terrain every time, or yesterday's run leaks into
+            // today's and the seed stops determining the session again.
+            let _ = std::fs::remove_file(&save_path);
+            println!("[gauntlet] scratch world seed {seed}, save {}", save_path.display());
+        }
         let (data, has_save) = if save::save_exists(&save_path) {
             match save::load_from_file(&save_path) {
                 Ok(d) => {
@@ -399,7 +488,7 @@ impl App {
                 }
             }
         } else {
-            (save::SaveData::new(1337), false)
+            (save::SaveData::new(gauntlet_seed.unwrap_or(1337) as u32), false)
         };
 
         let automated = std::env::args().any(|arg| {
@@ -477,23 +566,13 @@ impl App {
                 .unwrap_or(0.0),
             ui_demo: std::env::args().skip_while(|a| a != "--ui").nth(1),
             model_demo: std::env::args().skip_while(|a| a != "--model").nth(1),
-            gauntlet: std::env::args().any(|a| a == "--gauntlet").then(|| {
-                let arg = |name: &str| {
-                    std::env::args()
-                        .skip_while(|a| a != name)
-                        .nth(1)
-                        .and_then(|v| v.parse::<f64>().ok())
-                };
-                // An unseeded run picks its own seed and prints it, so a
-                // failure found by chance can still be replayed exactly.
-                let seed = arg("--seed").map(|v| v as u64).unwrap_or_else(|| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u64)
-                        .unwrap_or(0x5EED)
-                });
-                let secs = arg("--secs")
-                    .map(|v| v as f32)
+            // The same seed that chose the world above also drives the robot,
+            // so the whole session is a pure function of `--seed`.
+            gauntlet: gauntlet_seed.map(|seed| {
+                let secs = std::env::args()
+                    .skip_while(|a| a != "--secs")
+                    .nth(1)
+                    .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or(gauntlet::DEFAULT_SECONDS);
                 println!("[gauntlet] seed {seed}, {secs:.0}s session");
                 gauntlet::Harness::new(seed, secs)
@@ -510,6 +589,7 @@ impl App {
             time_of_day: 0.0,
             spawn,
             last_frame: Instant::now(),
+            last_frame_at: Instant::now(),
             fps: 0.0,
             fps_accum: 0.0,
             fps_frames: 0,
@@ -673,6 +753,7 @@ impl App {
                             );
                             self.data.edits.note_set_block(bx, by, bz, BlockId::AIR);
                             self.grant_drop(tool, broken);
+                            self.break_furnace_at((bx, by, bz));
                         }
                     }
                 } else if self.chip_timer <= 0.0 {
@@ -711,6 +792,7 @@ impl App {
                     self.note_carves(t);
                     if self.world.block_at(t.0, t.1, t.2).is_air() && !before.is_air() {
                         self.grant_drop(tool, before);
+                        self.break_furnace_at(t);
                         self.mined_kinds.push(before.0);
                         self.mining_target = None;
                         self.audio.play(
@@ -979,7 +1061,9 @@ impl App {
             ),
             inventory_total,
             inventory_bad,
-            world_idle: self.world.is_idle(),
+            world_idle: self.world.streaming_idle(),
+            relight_pending: self.world.relight_pending(),
+            queues: self.world.queue_depths(),
             panel: match self.ui {
                 Ui::Title => 0,
                 Ui::Playing => 0,
@@ -1202,6 +1286,19 @@ impl App {
         }
     }
 
+    /// A furnace block just stopped existing at `pos`. Drop its stored contents
+    /// into the player's pack, since they broke it deliberately and the items
+    /// have nowhere else to go -- there are no item entities in this game to
+    /// scatter them onto the ground. Anything that will not fit is lost.
+    fn break_furnace_at(&mut self, pos: save::BlockPos) {
+        let world = &self.world;
+        let salvage =
+            forget_orphan_furnaces(&mut self.furnaces, pos, pos, |x, y, z| world.block_at(x, y, z));
+        for stack in salvage {
+            self.data.inventory.add_item(stack.item, stack.count as u32);
+        }
+    }
+
     fn grant_drop(&mut self, tool: Option<ItemId>, broken: BlockId) {
         if let Some(dropped) = item::mining_drop(tool, broken) {
             self.data.inventory.add_item(dropped, 1);
@@ -1320,9 +1417,23 @@ impl App {
                 // hunger and brewing are deliberately out of scope, so there is
                 // nothing for them to become. The events are left in place so a
                 // later build can give them one.
-                MobEvent::Exploded { pos, .. } => {
+                MobEvent::Exploded { pos, radius } => {
                     self.audio
                         .play(audio::Sound::Explosion, audio::PlayOpts::at(pos, eye_now));
+                    // A blast can take a furnace with it. Whatever was inside is
+                    // gone: teleporting it into the player's pack from across the
+                    // map would be stranger than losing it, and leaving the entry
+                    // behind is the duplication bug this call exists to prevent.
+                    let r = radius.ceil() as i32 + 1;
+                    let b = pos.floor();
+                    let (bx, by, bz) = (b.x as i32, b.y as i32, b.z as i32);
+                    let world = &self.world;
+                    forget_orphan_furnaces(
+                        &mut self.furnaces,
+                        (bx - r, by - r, bz - r),
+                        (bx + r, by + r, bz + r),
+                        |x, y, z| world.block_at(x, y, z),
+                    );
                 }
                 MobEvent::MobDied { pos, .. } => {
                     self.audio
@@ -2096,8 +2207,19 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
-                let dt = (now - self.last_frame).as_secs_f32().min(0.1);
-                self.last_frame = now;
+                // A gauntlet session runs on a fixed step, not on wall-clock
+                // frame times. The robot's choices come from a seeded RNG drawn
+                // once per frame, so with a real `dt` the same seed makes a
+                // different number of draws on a busy machine than on an idle
+                // one and replays a different session -- which makes the printed
+                // "reproduce with --seed N" untrue exactly when it matters, on
+                // the rare failure you are trying to chase down.
+                let dt = if self.gauntlet.is_some() {
+                    GAUNTLET_STEP
+                } else {
+                    (now - self.last_frame_at).as_secs_f32().min(0.1)
+                };
+                self.last_frame_at = now;
 
                 let gauntlet_shot = if self.ui == Ui::Title {
                     None
@@ -2439,6 +2561,63 @@ mod tests {
 
         assert_eq!(cell.map(|s| s.count), Some(ItemId::COBBLESTONE.max_stack()));
         assert_eq!(carried.map(|s| s.count), Some(6));
+    }
+
+    /// The duplication exploit, stated as a test: mine a furnace, and its
+    /// contents must not survive to be inherited by the next one built there.
+    #[test]
+    fn a_broken_furnace_hands_its_contents_back_and_leaves_nothing_behind() {
+        let pos = (8, 64, -4);
+        let mut furnace = crafting::Furnace::new();
+        furnace.input = Some(ItemStack::new(ItemId::RAW_IRON, 2));
+        furnace.fuel = Some(ItemStack::new(ItemId::COAL, 1));
+        furnace.tick(2.0);
+        // Ask the furnace what it is holding rather than assuming: two seconds
+        // in, the coal has already been consumed into the flame and some of the
+        // iron may have become an ingot.
+        let mut expected: Vec<_> = [furnace.input, furnace.fuel, furnace.output]
+            .into_iter()
+            .flatten()
+            .collect();
+        assert!(!expected.is_empty(), "the test furnace must hold something");
+        let mut furnaces = HashMap::from([(pos, furnace)]);
+
+        // The block is gone; the map entry has not caught up yet.
+        let mut salvage = forget_orphan_furnaces(&mut furnaces, pos, pos, |_, _, _| BlockId::AIR);
+
+        assert!(
+            furnaces.is_empty(),
+            "an orphan entry here is a save that grows forever and a furnace              that resurrects its contents for whoever builds on the spot next"
+        );
+        expected.sort_by_key(|s| s.item.0);
+        salvage.sort_by_key(|s| s.item.0);
+        assert_eq!(salvage, expected, "everything inside should come back out");
+    }
+
+    #[test]
+    fn a_furnace_that_is_still_standing_is_left_alone() {
+        let pos = (8, 64, -4);
+        let mut furnaces = HashMap::from([(pos, crafting::Furnace::new())]);
+        let salvage =
+            forget_orphan_furnaces(&mut furnaces, pos, pos, |_, _, _| BlockId::FURNACE);
+        assert_eq!(furnaces.len(), 1);
+        assert!(salvage.is_empty());
+    }
+
+    /// The reason the sweep is bounded to a region. Outside the loaded area
+    /// `block_at` answers from raw terrain, which never contains a furnace, so
+    /// an unbounded sweep would quietly eat every furnace the player owns the
+    /// moment they walked away from one.
+    #[test]
+    fn a_furnace_outside_the_swept_region_is_never_touched() {
+        let far = (900, 64, -900);
+        let mut furnaces = HashMap::from([(far, crafting::Furnace::new())]);
+        forget_orphan_furnaces(&mut furnaces, (0, 0, 0), (16, 80, 16), |_, _, _| BlockId::AIR);
+        assert_eq!(
+            furnaces.len(),
+            1,
+            "a furnace in an unloaded chunk must survive a sweep somewhere else"
+        );
     }
 
     #[test]
