@@ -10,8 +10,10 @@ mod audio;
 mod block;
 mod camera;
 mod chunk;
+mod cli;
 mod config;
 mod crafting;
+mod daylight;
 mod gauntlet;
 mod gfx;
 mod hud;
@@ -24,24 +26,34 @@ mod model;
 mod pathfind;
 mod save;
 mod screenshot;
+mod session;
 mod sound;
 mod texture;
+mod ui;
 mod world;
 mod worldgen;
 
 use block::BlockId;
 use camera::{Camera, MoveInput, Player};
 use chunk::ChunkPos;
+use cli::Cli;
 use config::*;
+use daylight::{DAY_FRACTION, DAY_LENGTH, daylight_at, sky_for, sun_for};
 use glam::Vec3;
 use hud::Slot;
 use inventory::ItemStack;
 use item::ItemId;
 use mob::{MobEvent, MobKind, MobManager, PlayerState};
+use session::{Hands, Stats};
 use sound::SoundField;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
+use ui::{
+    SLOT_PX, TitleAction, craft_output_rect, craft_rect, draw_panel, draw_title_screen,
+    furnace_rect, merge_into_cell, return_panel_items, slot_rect, store_output, swap_carried,
+    title_action,
+};
 use winit::application::ApplicationHandler;
 use winit::event::{
     DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
@@ -84,66 +96,6 @@ impl save::WorldEdit for World {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Day/night. Kept here rather than in config.rs because it is the only system
-// that is purely presentation plus one number the mob spawner reads.
-// ---------------------------------------------------------------------------
-
-/// Seconds for one full day/night cycle.
-const DAY_LENGTH: f32 = 600.0;
-/// Fraction of the cycle spent in full daylight.
-const DAY_FRACTION: f32 = 0.55;
-const SKY_NIGHT: [f32; 3] = [0.03, 0.04, 0.08];
-
-/// 1.0 at noon, 0.0 at midnight, with dawn and dusk ramps between.
-fn daylight_at(time_of_day: f32) -> f32 {
-    let t = (time_of_day / DAY_LENGTH).fract();
-    let twilight = (1.0 - DAY_FRACTION) * 0.5;
-    if t < DAY_FRACTION {
-        1.0
-    } else if t < DAY_FRACTION + twilight {
-        1.0 - (t - DAY_FRACTION) / twilight
-    } else if t < DAY_FRACTION + twilight * 2.0 {
-        0.0
-    } else {
-        (t - DAY_FRACTION - twilight * 2.0) / twilight.max(1.0e-4)
-    }
-    .clamp(0.0, 1.0)
-}
-
-/// Where the sun is, and how hard it is shining.
-///
-/// Returned as a direction *toward* the sun plus a strength, which is what the
-/// shader wants. The arc is tilted rather than passing straight overhead: a sun
-/// that crosses the exact zenith lights every upward face identically at noon
-/// and flattens the whole landscape for the middle third of the day.
-///
-/// At night the direction is kept pointing at where the sun will rise instead of
-/// being zeroed, so that nothing has to divide by a zero-length vector; the
-/// strength is what actually turns the light off.
-fn sun_for(time_of_day: f32) -> [f32; 4] {
-    let t = (time_of_day / DAY_LENGTH).fract();
-    // Sunrise at the start of the day arc, sunset at its end.
-    let angle = std::f32::consts::PI * (t / DAY_FRACTION).clamp(0.0, 1.0);
-    let tilt = 0.42;
-    let dir = Vec3::new(
-        angle.cos(),
-        angle.sin() * (1.0 - tilt) + tilt * 0.35,
-        -tilt * 1.15,
-    )
-    .normalize();
-    let strength = daylight_at(time_of_day);
-    [dir.x, dir.y, dir.z, strength]
-}
-
-fn sky_for(daylight: f32) -> [f32; 3] {
-    let mut out = [0.0; 3];
-    for i in 0..3 {
-        out[i] = SKY_NIGHT[i] + (SKY_COLOR[i] - SKY_NIGHT[i]) * daylight;
-    }
-    out
-}
-
 /// A hunched, asymmetrical grave-roamer built from articulated low-poly parts.
 /// It deliberately avoids the familiar square-shirt humanoid silhouette: the
 /// shoulders are uneven, the jaw projects, and its long arms lead its gait.
@@ -159,7 +111,10 @@ fn append_mob_model(
     m: &mob::Mob,
     light: f32,
 ) {
-    let kind_index = mob::MobKind::ALL.iter().position(|k| *k == m.kind).unwrap_or(0);
+    let kind_index = mob::MobKind::ALL
+        .iter()
+        .position(|k| *k == m.kind)
+        .unwrap_or(0);
     let speed = Vec3::new(m.vel.x, 0.0, m.vel.z).length();
 
     let pose = model::Pose {
@@ -170,7 +125,11 @@ fn append_mob_model(
         head_yaw: 0.0,
         head_pitch: 0.0,
         attack: 0.0,
-        arms_forward: if m.kind == mob::MobKind::Zombie { 1.0 } else { 0.0 },
+        arms_forward: if m.kind == mob::MobKind::Zombie {
+            1.0
+        } else {
+            0.0
+        },
         waddle: m.kind == mob::MobKind::Creeper,
         on_all_fours: m.kind == mob::MobKind::Pig,
     };
@@ -189,15 +148,7 @@ fn append_mob_model(
     };
 
     model::append(
-        parts,
-        kind_index,
-        verts,
-        indices,
-        m.pos,
-        m.yaw,
-        scale,
-        &pose,
-        light,
+        parts, kind_index, verts, indices, m.pos, m.yaw, scale, &pose, light,
     );
 }
 
@@ -329,26 +280,6 @@ fn capture_live_state(
 /// plays, so the physics and timers the robot exercises behave as a player's do.
 const GAUNTLET_STEP: f32 = 1.0 / 60.0;
 
-/// The `--gauntlet` run seed, if this is a gauntlet run at all. An unseeded run
-/// picks one from the clock so a failure found by chance can still be replayed.
-fn gauntlet_run_seed() -> Option<u64> {
-    if !std::env::args().any(|a| a == "--gauntlet") {
-        return None;
-    }
-    Some(
-        std::env::args()
-            .skip_while(|a| a != "--seed")
-            .nth(1)
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or_else(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(1)
-            }),
-    )
-}
-
 fn forget_orphan_furnaces(
     furnaces: &mut HashMap<save::BlockPos, crafting::Furnace>,
     lo: save::BlockPos,
@@ -357,9 +288,8 @@ fn forget_orphan_furnaces(
 ) -> Vec<ItemStack> {
     let mut salvaged = Vec::new();
     furnaces.retain(|&(x, y, z), furnace| {
-        let inside = (lo.0..=hi.0).contains(&x)
-            && (lo.1..=hi.1).contains(&y)
-            && (lo.2..=hi.2).contains(&z);
+        let inside =
+            (lo.0..=hi.0).contains(&x) && (lo.1..=hi.1).contains(&y) && (lo.2..=hi.2).contains(&z);
         if !inside || block_at(x, y, z) == BlockId::FURNACE {
             return true;
         }
@@ -423,44 +353,32 @@ struct App {
     cursor: (f32, f32),
 
     cursor_locked: bool,
-    mining: bool,
-    placing: bool,
-    /// Left Alt: the loud, fast, whole-block break.
-    smash_mode: bool,
-    chip_timer: f32,
-    place_timer: f32,
-    attack_timer: f32,
-    /// The block the current swing is committed to eating.
-    mining_target: Option<(i32, i32, i32)>,
     /// Set by `--shot <path>`: capture one frame once the world is loaded, then quit.
-    shot_path: Option<std::path::PathBuf>,
+
     /// `--demo`: carve a crater and spawn one of each mob before capturing, so
     /// the two headline mechanics can be verified in a still frame.
-    demo: bool,
+
     /// `--models`: a review stand showing every mob together.
-    models_review: bool,
+
     /// `--angle <degrees>`: turn the review models by this much.
-    review_angle: f32,
+
     /// `--ui table` / `--ui furnace`: open that panel before capturing.
-    ui_demo: Option<String>,
+
     /// `--model zombie`: stage one model close to the camera for visual QA.
-    model_demo: Option<String>,
-    /// `--vista`: put the camera on high ground and look out, for judging the
-    /// shape of the terrain rather than the block under your feet.
-    vista: bool,
+
+    /// What the program was asked to do on the command line.
+    cli: Cli,
+    /// What the player is doing with their hands, and its cooldowns.
+    hands: Hands,
+    /// Counters for the overlay and the test harness. Never read back by the
+    /// simulation.
+    stats: Stats,
     /// `--gauntlet`: a robot plays the game and reports what broke.
     gauntlet: Option<gauntlet::Harness>,
-    /// Block ids mined and placed this frame, for coverage tracking.
-    mined_kinds: Vec<u8>,
-    placed_kinds: Vec<u8>,
-    stat_crafted: u64,
     save_roundtrip: Option<bool>,
     /// Multiplier on the day/night clock, driven by the gauntlet.
     time_scale: f32,
     // Monotonic counters the gauntlet watches to tell whether anything happened.
-    stat_carved: u64,
-    stat_broken: u64,
-    stat_placed: u64,
     shot_countdown: i32,
 
     time_of_day: f32,
@@ -468,9 +386,6 @@ struct App {
     last_frame: Instant,
     /// Wall clock at the previous rendered frame, for the real-time `dt`.
     last_frame_at: Instant,
-    fps: f32,
-    fps_accum: f32,
-    fps_frames: u32,
     /// Set while the streamer is still filling the initial radius.
     loading: bool,
     gauntlet_done: bool,
@@ -494,7 +409,8 @@ impl App {
         //
         // Deriving the world seed from the run seed makes a session a pure
         // function of `--seed`, which is the whole point of a replayable harness.
-        let gauntlet_seed = gauntlet_run_seed();
+        let cli = Cli::from_args();
+        let gauntlet_seed = cli.gauntlet_seed;
         let save_path = match gauntlet_seed {
             Some(_) => std::env::temp_dir().join("loudstone_gauntlet_world.lsw"),
             None => save::default_save_path(),
@@ -503,7 +419,10 @@ impl App {
             // Start from bare terrain every time, or yesterday's run leaks into
             // today's and the seed stops determining the session again.
             let _ = std::fs::remove_file(&save_path);
-            println!("[gauntlet] scratch world seed {seed}, save {}", save_path.display());
+            println!(
+                "[gauntlet] scratch world seed {seed}, save {}",
+                save_path.display()
+            );
         }
         let (data, has_save) = if save::save_exists(&save_path) {
             match save::load_from_file(&save_path) {
@@ -517,16 +436,11 @@ impl App {
                 }
             }
         } else {
-            (save::SaveData::new(gauntlet_seed.unwrap_or(1337) as u32), false)
-        };
-
-        let automated = std::env::args().any(|arg| {
-            matches!(
-                arg.as_str(),
-                "--shot" | "--demo" | "--ui" | "--model" | "--gauntlet" | "--vista"
+            (
+                save::SaveData::new(gauntlet_seed.unwrap_or(1337) as u32),
+                false,
             )
-        });
-        let force_title = std::env::args().any(|arg| arg == "--title");
+        };
 
         let world = World::new(data.seed);
         let ground = world.surface_y(0, 0) as f32 + 1.0;
@@ -565,7 +479,7 @@ impl App {
             has_save,
             time_since_save: 0.0,
             replayed: HashSet::new(),
-            ui: if automated && !force_title {
+            ui: if cli.automated() {
                 Ui::Playing
             } else {
                 Ui::Title
@@ -575,54 +489,23 @@ impl App {
             carried: None,
             cursor: (0.0, 0.0),
             cursor_locked: false,
-            mining: false,
-            placing: false,
-            smash_mode: false,
-            chip_timer: 0.0,
-            place_timer: 0.0,
-            attack_timer: 0.0,
-            mining_target: None,
-            shot_path: std::env::args()
-                .skip_while(|a| a != "--shot")
-                .nth(1)
-                .map(std::path::PathBuf::from),
-            demo: std::env::args().any(|a| a == "--demo"),
-            vista: std::env::args().any(|a| a == "--vista"),
-            models_review: std::env::args().any(|a| a == "--models"),
-            review_angle: std::env::args()
-                .skip_while(|a| a != "--angle")
-                .nth(1)
-                .and_then(|v| v.parse::<f32>().ok())
-                .unwrap_or(0.0),
-            ui_demo: std::env::args().skip_while(|a| a != "--ui").nth(1),
-            model_demo: std::env::args().skip_while(|a| a != "--model").nth(1),
             // The same seed that chose the world above also drives the robot,
             // so the whole session is a pure function of `--seed`.
-            gauntlet: gauntlet_seed.map(|seed| {
-                let secs = std::env::args()
-                    .skip_while(|a| a != "--secs")
-                    .nth(1)
-                    .and_then(|v| v.parse::<f32>().ok())
-                    .unwrap_or(gauntlet::DEFAULT_SECONDS);
+            gauntlet: cli.gauntlet_seed.map(|seed| {
+                let secs = cli.gauntlet_secs.unwrap_or(gauntlet::DEFAULT_SECONDS);
                 println!("[gauntlet] seed {seed}, {secs:.0}s session");
                 gauntlet::Harness::new(seed, secs)
             }),
-            mined_kinds: Vec::new(),
-            placed_kinds: Vec::new(),
-            stat_crafted: 0,
+            cli,
+            hands: Hands::default(),
+            stats: Stats::default(),
             save_roundtrip: None,
             time_scale: 1.0,
-            stat_carved: 0,
-            stat_broken: 0,
-            stat_placed: 0,
             shot_countdown: 90,
             time_of_day: 0.0,
             spawn,
             last_frame: Instant::now(),
             last_frame_at: Instant::now(),
-            fps: 0.0,
-            fps_accum: 0.0,
-            fps_frames: 0,
             loading: true,
             gauntlet_done: false,
             gauntlet_stocked: false,
@@ -702,9 +585,7 @@ impl App {
         self.craft_grid.fill(None);
         self.carried = None;
         self.input = MoveInput::default();
-        self.mining = false;
-        self.placing = false;
-        self.mining_target = None;
+        self.hands.stop();
         self.time_of_day = 0.0;
         self.save_now();
         self.enter_world();
@@ -712,9 +593,7 @@ impl App {
 
     /// Mining, placing, and the noise both of them make.
     fn interact(&mut self, dt: f32) {
-        self.chip_timer -= dt;
-        self.place_timer -= dt;
-        self.attack_timer -= dt;
+        self.hands.tick(dt);
 
         let eye = self.camera.pos;
         let hit = self
@@ -727,11 +606,11 @@ impl App {
 
         // A swing hits a mob before it touches the world behind it. Mining a
         // block the mob is standing in front of would otherwise be impossible.
-        if self.mining && self.attack_timer <= 0.0 {
+        if self.hands.mining && self.hands.attack_timer <= 0.0 {
             let block_dist = hit.map(|h| h.distance).unwrap_or(REACH);
             if let Some((id, mob_pos, dist)) = self.mob_under_crosshair(REACH) {
                 if dist <= block_dist {
-                    self.attack_timer = ATTACK_INTERVAL;
+                    self.hands.attack_timer = ATTACK_INTERVAL;
                     let damage = self
                         .data
                         .inventory
@@ -763,19 +642,19 @@ impl App {
         let Some(hit) = hit else { return };
         let (bx, by, bz) = hit.block;
 
-        if self.mining {
+        if self.hands.mining {
             let target = self.world.block_at(bx, by, bz);
             if target.hardness().is_finite() && !target.is_air() {
                 let tool = self.data.inventory.selected_item();
 
-                if self.smash_mode {
+                if self.hands.smash {
                     // Loud and fast: the whole block leaves at once. Everything
                     // within earshot hears it.
-                    if self.chip_timer <= 0.0 {
-                        self.chip_timer = SMASH_CHARGE;
+                    if self.hands.chip_timer <= 0.0 {
+                        self.hands.chip_timer = SMASH_CHARGE;
                         if let Some(broken) = self.world.smash_block(bx, by, bz) {
-                            self.stat_broken += 1;
-                            self.mined_kinds.push(broken.0);
+                            self.stats.broken += 1;
+                            self.stats.mined_kinds.push(broken.0);
                             // A smash is the loud option, and it should sound it.
                             self.audio.play(
                                 audio::Sound::Break(broken),
@@ -786,29 +665,30 @@ impl App {
                             self.break_furnace_at((bx, by, bz));
                         }
                     }
-                } else if self.chip_timer <= 0.0 {
+                } else if self.hands.chip_timer <= 0.0 {
                     // Sticky targeting: keep eating the block the swing started
                     // on. Without it, the moment the ray drills through, mining
                     // silently jumps to the block behind and leaves a ring of
                     // the first one standing.
                     let aimed = (bx, by, bz);
-                    if self.mining_target != Some(aimed)
+                    if self.hands.target != Some(aimed)
                         && self
-                            .mining_target
+                            .hands
+                            .target
                             .map(|t| self.world.block_at(t.0, t.1, t.2).is_air())
                             .unwrap_or(true)
                     {
-                        self.mining_target = Some(aimed);
+                        self.hands.target = Some(aimed);
                     }
                     // Quiet and slow: carve a small sphere of sub-voxels. Hard
                     // blocks take proportionally longer per bite.
                     let speed = item::mining_speed_multiplier(tool, target);
-                    self.chip_timer = CHIP_INTERVAL * target.hardness() / speed.max(0.01);
+                    self.hands.chip_timer = CHIP_INTERVAL * target.hardness() / speed.max(0.01);
 
-                    let t = self.mining_target.unwrap_or(aimed);
+                    let t = self.hands.target.unwrap_or(aimed);
                     let before = self.world.block_at(t.0, t.1, t.2);
                     let removed = self.world.chip_block(t, hit.point, CHIP_RADIUS);
-                    self.stat_carved += removed as u64;
+                    self.stats.carved += removed as u64;
                     if removed > 0 {
                         // The dig tick has its own cooldown inside the mixer, so
                         // firing it every chip becomes a steady scrape rather
@@ -823,8 +703,8 @@ impl App {
                     if self.world.block_at(t.0, t.1, t.2).is_air() && !before.is_air() {
                         self.grant_drop(tool, before);
                         self.break_furnace_at(t);
-                        self.mined_kinds.push(before.0);
-                        self.mining_target = None;
+                        self.stats.mined_kinds.push(before.0);
+                        self.hands.target = None;
                         self.audio.play(
                             audio::Sound::Break(before),
                             audio::PlayOpts::at(hit.point, eye),
@@ -834,13 +714,12 @@ impl App {
             }
         }
 
-        if self.placing && self.place_timer <= 0.0 {
+        if self.hands.placing && self.hands.place_timer <= 0.0 {
             // Right-clicking a workstation opens it rather than placing against it.
             let aimed = self.world.block_at(bx, by, bz);
             if aimed == BlockId::CRAFTING_TABLE || aimed == BlockId::FURNACE {
-                self.place_timer = PLACE_INTERVAL;
-                self.placing = false;
-                self.mining = false;
+                self.hands.place_timer = PLACE_INTERVAL;
+                self.hands.stop();
                 self.ui = if aimed == BlockId::FURNACE {
                     self.furnaces.entry((bx, by, bz)).or_default();
                     Ui::Furnace((bx, by, bz))
@@ -860,8 +739,8 @@ impl App {
             let (px, py, pz) = hit.adjacent();
             let (min, max) = self.player.aabb();
             if self.world.place_block(px, py, pz, id, min, max) {
-                self.stat_placed += 1;
-                self.placed_kinds.push(id.0);
+                self.stats.placed += 1;
+                self.stats.placed_kinds.push(id.0);
                 self.audio.play(
                     audio::Sound::Place(id),
                     audio::PlayOpts::at(
@@ -872,7 +751,7 @@ impl App {
                 self.data.edits.note_set_block(px, py, pz, id);
                 let sel = self.data.inventory.selected();
                 self.data.inventory.take_from_slot(sel, 1);
-                self.place_timer = PLACE_INTERVAL;
+                self.hands.place_timer = PLACE_INTERVAL;
             }
         }
     }
@@ -920,7 +799,11 @@ impl App {
                 let p = base + fwd * d as f32 + right * w as f32;
                 let (x, z) = (p.x.floor() as i32, p.z.floor() as i32);
                 for y in (gy - 2)..=(gy + 6) {
-                    let id = if y <= gy { BlockId::STONE } else { BlockId::AIR };
+                    let id = if y <= gy {
+                        BlockId::STONE
+                    } else {
+                        BlockId::AIR
+                    };
                     self.world.set_block(x, y, z, id);
                 }
             }
@@ -943,7 +826,7 @@ impl App {
             // model.rs, so this offset belongs to the review stand alone.
             let to_cam = self.camera.pos - Vec3::new(p.x, gy as f32 + 1.0, p.z);
             let face_cam = to_cam.z.atan2(to_cam.x) + std::f32::consts::PI;
-            let turn = self.review_angle.to_radians();
+            let turn = self.cli.review_angle.to_radians();
             self.mobs.face_and_freeze(m, face_cam + turn);
             self.mobs.pin(m, Vec3::new(p.x, gy as f32 + 1.0, p.z));
         }
@@ -1111,7 +994,7 @@ impl App {
             vel: self.player.vel,
             on_ground: self.player.on_ground,
             health: self.data.player.health,
-            fps: self.fps,
+            fps: self.stats.fps,
             chunks: self.world.chunks.len(),
             mobs: self.mobs.mobs().len(),
             mob_pos_bad,
@@ -1140,12 +1023,12 @@ impl App {
                 Ui::Table => 2,
                 Ui::Furnace(_) => 3,
             },
-            carved: self.stat_carved,
-            broken: self.stat_broken,
-            placed: self.stat_placed,
-            crafted: self.stat_crafted,
-            mined_kinds: std::mem::take(&mut self.mined_kinds),
-            placed_kinds: std::mem::take(&mut self.placed_kinds),
+            carved: self.stats.carved,
+            broken: self.stats.broken,
+            placed: self.stats.placed,
+            crafted: self.stats.crafted,
+            mined_kinds: std::mem::take(&mut self.stats.mined_kinds),
+            placed_kinds: std::mem::take(&mut self.stats.placed_kinds),
             save_roundtrip: self.save_roundtrip.take(),
         };
 
@@ -1161,9 +1044,9 @@ impl App {
         };
 
         self.input = frame.input;
-        self.mining = frame.mine;
-        self.smash_mode = frame.smash;
-        self.placing = frame.place;
+        self.hands.mining = frame.mine;
+        self.hands.smash = frame.smash;
+        self.hands.placing = frame.place;
         self.camera.yaw += frame.yaw_rate * dt;
         if let Some(pitch) = frame.look_pitch {
             self.camera.pitch = pitch.clamp(-1.5, 1.5);
@@ -1183,7 +1066,7 @@ impl App {
         }
         if frame.attack {
             // Swing at whatever is in front, through the same path a click takes.
-            self.mining = true;
+            self.hands.mining = true;
         }
         if frame.craft {
             // Fill the 2x2 with planks and take whatever it resolves to. This
@@ -1194,7 +1077,7 @@ impl App {
             }
             if let Some(out) = crafting::craft(&mut self.craft_grid[..4]) {
                 self.data.inventory.add_item(out.item, out.count as u32);
-                self.stat_crafted += 1;
+                self.stats.crafted += 1;
             }
             self.craft_grid = [None; 9];
         }
@@ -1361,8 +1244,9 @@ impl App {
     /// scatter them onto the ground. Anything that will not fit is lost.
     fn break_furnace_at(&mut self, pos: save::BlockPos) {
         let world = &self.world;
-        let salvage =
-            forget_orphan_furnaces(&mut self.furnaces, pos, pos, |x, y, z| world.block_at(x, y, z));
+        let salvage = forget_orphan_furnaces(&mut self.furnaces, pos, pos, |x, y, z| {
+            world.block_at(x, y, z)
+        });
         for stack in salvage {
             self.data.inventory.add_item(stack.item, stack.count as u32);
         }
@@ -1394,7 +1278,7 @@ impl App {
         self.world.set_daylight(daylight);
 
         // --- movement, then the camera rides the player's eyes ---
-        if self.ui == Ui::Playing && self.model_demo.is_none() {
+        if self.ui == Ui::Playing && self.cli.model_demo.is_none() {
             self.player
                 .update(&self.world, &self.camera, &self.input, dt);
         }
@@ -1599,7 +1483,7 @@ impl App {
             .iter()
             .map(|s| s.map(|st| Slot::new(st.item.color(), st.count as u16)))
             .collect();
-        if self.ui == Ui::Playing && self.model_demo.is_none() {
+        if self.ui == Ui::Playing && self.cli.model_demo.is_none() {
             gfx.hud.hotbar(&slots, self.data.inventory.selected());
             gfx.hud.health(self.data.player.health, 20.0);
             gfx.hud.crosshair();
@@ -1611,13 +1495,13 @@ impl App {
             .selected_stack()
             .map(|s| s.item.name().to_string())
             .unwrap_or_else(|| "empty hand".to_string());
-        if self.model_demo.is_none() {
+        if self.cli.model_demo.is_none() {
             gfx.hud.readout(
                 self.player.pos.to_array(),
-                self.fps,
+                self.stats.fps,
                 &format!(
                     "{held}  |  {}  |  {}",
-                    if self.smash_mode {
+                    if self.hands.smash {
                         "SMASH (loud)"
                     } else {
                         "chip (quiet)"
@@ -1656,273 +1540,6 @@ impl App {
         gfx.render(&self.camera, sky, sun_for(self.time_of_day));
     }
 }
-
-// --- title screen -----------------------------------------------------------
-
-const MENU_BUTTON_W: f32 = 360.0;
-const MENU_BUTTON_H: f32 = 52.0;
-const MENU_BUTTON_GAP: f32 = 14.0;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum TitleAction {
-    Continue,
-    NewWorld,
-    Quit,
-}
-
-fn menu_button_rect(w: f32, h: f32, index: usize) -> (f32, f32, f32, f32) {
-    let total_h = MENU_BUTTON_H * 3.0 + MENU_BUTTON_GAP * 2.0;
-    (
-        (w - MENU_BUTTON_W) * 0.5,
-        h * 0.55 - total_h * 0.5 + index as f32 * (MENU_BUTTON_H + MENU_BUTTON_GAP),
-        MENU_BUTTON_W,
-        MENU_BUTTON_H,
-    )
-}
-
-fn point_in_rect(point: (f32, f32), rect: (f32, f32, f32, f32)) -> bool {
-    point.0 >= rect.0 && point.0 < rect.0 + rect.2 && point.1 >= rect.1 && point.1 < rect.1 + rect.3
-}
-
-fn title_action(w: f32, h: f32, cursor: (f32, f32), has_save: bool) -> Option<TitleAction> {
-    if has_save && point_in_rect(cursor, menu_button_rect(w, h, 0)) {
-        Some(TitleAction::Continue)
-    } else if point_in_rect(cursor, menu_button_rect(w, h, 1)) {
-        Some(TitleAction::NewWorld)
-    } else if point_in_rect(cursor, menu_button_rect(w, h, 2)) {
-        Some(TitleAction::Quit)
-    } else {
-        None
-    }
-}
-
-fn draw_title_screen(gfx: &mut gfx::Renderer, has_save: bool, cursor: (f32, f32)) {
-    let (w, h) = (gfx.config.width as f32, gfx.config.height as f32);
-    gfx.hud.rect(0.0, 0.0, w, h, [0.025, 0.045, 0.075, 1.0]);
-
-    let title = "LOUDSTONE";
-    let title_size = 52.0;
-    gfx.hud.text_shadowed(
-        (w - hud::text_width(title_size, title)) * 0.5,
-        h * 0.18,
-        title_size,
-        [0.93, 0.95, 0.98, 1.0],
-        title,
-    );
-    let subtitle = "A WORLD SHAPED BY SOUND";
-    gfx.hud.text(
-        (w - hud::text_width(hud::TEXT_SIZE, subtitle)) * 0.5,
-        h * 0.18 + 66.0,
-        hud::TEXT_SIZE,
-        [0.55, 0.72, 0.76, 1.0],
-        subtitle,
-    );
-
-    let actions = [
-        ("CONTINUE WORLD", has_save),
-        ("CREATE NEW WORLD", true),
-        ("QUIT GAME", true),
-    ];
-    for (index, (label, enabled)) in actions.into_iter().enumerate() {
-        let rect = menu_button_rect(w, h, index);
-        let hovered = enabled && point_in_rect(cursor, rect);
-        let fill = if !enabled {
-            [0.10, 0.12, 0.15, 0.96]
-        } else if hovered {
-            [0.22, 0.38, 0.40, 0.98]
-        } else {
-            [0.14, 0.20, 0.23, 0.98]
-        };
-        let edge = if hovered {
-            [0.78, 0.92, 0.82, 1.0]
-        } else {
-            [0.38, 0.48, 0.50, 1.0]
-        };
-        gfx.hud.rect(rect.0, rect.1, rect.2, rect.3, fill);
-        gfx.hud.border(rect.0, rect.1, rect.2, rect.3, 2.0, edge);
-        let color = if enabled {
-            [0.94, 0.96, 0.96, 1.0]
-        } else {
-            [0.42, 0.45, 0.46, 1.0]
-        };
-        let size = 18.0;
-        gfx.hud.text_shadowed(
-            rect.0 + (rect.2 - hud::text_width(size, label)) * 0.5,
-            rect.1 + (rect.3 - size) * 0.5,
-            size,
-            color,
-            label,
-        );
-    }
-
-    let save_note = if has_save {
-        "CONTINUE LOADS SAVES/WORLD.LSW"
-    } else {
-        "NO SAVED WORLD YET"
-    };
-    gfx.hud.text(
-        (w - hud::text_width(hud::TEXT_SIZE, save_note)) * 0.5,
-        h * 0.83,
-        hud::TEXT_SIZE,
-        [0.48, 0.57, 0.59, 1.0],
-        save_note,
-    );
-}
-
-// --- inventory screen geometry, shared by drawing and hit-testing ------------
-
-const SLOT_PX: f32 = 44.0;
-const SLOT_GAP: f32 = 4.0;
-
-/// Top-left of the 9x4 inventory grid for a given screen size.
-fn inv_origin(w: f32, h: f32) -> (f32, f32) {
-    let gw = 9.0 * SLOT_PX + 8.0 * SLOT_GAP;
-    ((w - gw) * 0.5, h * 0.5 - 40.0)
-}
-
-/// Screen rect of one flat slot index (0..36).
-fn slot_rect(w: f32, h: f32, index: usize) -> (f32, f32) {
-    let (ox, oy) = inv_origin(w, h);
-    // Row 0 is the hotbar, drawn at the bottom of the panel with a gap.
-    let (col, row) = (index % 9, index / 9);
-    let y = if row == 0 {
-        oy + 3.0 * (SLOT_PX + SLOT_GAP) + 14.0
-    } else {
-        oy + (row as f32 - 1.0) * (SLOT_PX + SLOT_GAP)
-    };
-    (ox + col as f32 * (SLOT_PX + SLOT_GAP), y)
-}
-
-/// Crafting cell rect. `cells` is 4 (2x2) or 9 (3x3); the grid stays centred on
-/// the same column either way, so the panel does not jump when it widens.
-fn craft_rect(w: f32, h: f32, index: usize, cells: usize) -> (f32, f32) {
-    let (ox, oy) = inv_origin(w, h);
-    let step = SLOT_PX + SLOT_GAP;
-    let side = if cells == 9 { 3 } else { 2 };
-    let cx = ox + 4.6 * step - side as f32 * step * 0.5;
-    let cy = oy - (0.4 + side as f32) * step;
-    (
-        cx + (index % side) as f32 * step,
-        cy + (index / side) as f32 * step,
-    )
-}
-
-fn craft_output_rect(w: f32, h: f32, cells: usize) -> (f32, f32) {
-    let (ox, oy) = inv_origin(w, h);
-    let step = SLOT_PX + SLOT_GAP;
-    let side = if cells == 9 { 3 } else { 2 };
-    (ox + 6.4 * step, oy - (0.9 + side as f32 * 0.5) * step)
-}
-
-/// Furnace slots: 0 input (top), 1 fuel (below it), 2 output (to the right).
-fn furnace_rect(w: f32, h: f32, index: usize) -> (f32, f32) {
-    let (ox, oy) = inv_origin(w, h);
-    let step = SLOT_PX + SLOT_GAP;
-    let cx = ox + 3.2 * step;
-    let cy = oy - 3.4 * step;
-    match index {
-        0 => (cx, cy),
-        1 => (cx, cy + 2.0 * step),
-        _ => (cx + 3.0 * step, cy + step),
-    }
-}
-
-fn draw_panel(
-    gfx: &mut gfx::Renderer,
-    ui: Ui,
-    inv: &inventory::Inventory,
-    grid: &[Option<ItemStack>; 9],
-    furnace: Option<&crafting::Furnace>,
-    carried: Option<ItemStack>,
-    cursor: (f32, f32),
-) {
-    let (w, h) = (gfx.config.width as f32, gfx.config.height as f32);
-    gfx.hud.screen_dim();
-    let (ox, oy) = inv_origin(w, h);
-    let gw = 9.0 * SLOT_PX + 8.0 * SLOT_GAP;
-    let step = SLOT_PX + SLOT_GAP;
-    gfx.hud
-        .panel(ox - 16.0, oy - 4.8 * step, gw + 32.0, 8.2 * step + 40.0);
-
-    let to_slot = |s: Option<ItemStack>| s.map(|st| Slot::new(st.item.color(), st.count as u16));
-
-    // The 36 inventory slots are common to every panel.
-    for i in 0..36 {
-        let (x, y) = slot_rect(w, h, i);
-        gfx.hud
-            .slot(x, y, SLOT_PX, to_slot(inv.slot(i)), i == inv.selected());
-    }
-
-    let title = match ui {
-        Ui::Furnace(_) => "FURNACE   ore above, fuel below",
-        Ui::Table => "CRAFTING TABLE   3x3",
-        _ => "INVENTORY   2x2, table for tools",
-    };
-
-    match ui {
-        Ui::Furnace(_) => {
-            let f = furnace.expect("furnace panel opened without a furnace");
-            for (i, stack) in [f.input, f.fuel, f.output].iter().enumerate() {
-                let (x, y) = furnace_rect(w, h, i);
-                gfx.hud.slot(x, y, SLOT_PX, to_slot(*stack), false);
-            }
-            // Flame and progress gauges, as plain bars.
-            let (fx, fy) = furnace_rect(w, h, 1);
-            let burn = f.burn_fraction();
-            gfx.hud.rect(
-                fx + SLOT_PX + 8.0,
-                fy + SLOT_PX * (1.0 - burn),
-                10.0,
-                SLOT_PX * burn,
-                [0.95, 0.55, 0.15, 1.0],
-            );
-            let (px, py) = furnace_rect(w, h, 0);
-            let prog = f.progress_fraction();
-            gfx.hud.rect(
-                px + SLOT_PX + 8.0,
-                py + SLOT_PX * 0.45,
-                (2.6 * step - 16.0) * prog,
-                10.0,
-                [0.85, 0.85, 0.9, 1.0],
-            );
-        }
-        _ => {
-            let cells = ui.craft_cells();
-            for i in 0..cells {
-                let (x, y) = craft_rect(w, h, i, cells);
-                gfx.hud.slot(x, y, SLOT_PX, to_slot(grid[i]), false);
-            }
-            let (cx, cy) = craft_output_rect(w, h, cells);
-            gfx.hud.slot(
-                cx,
-                cy,
-                SLOT_PX,
-                to_slot(crafting::resolve(&grid[..cells])),
-                false,
-            );
-        }
-    }
-
-    gfx.hud.text_shadowed(
-        ox,
-        oy - 4.55 * step,
-        hud::TEXT_SIZE,
-        [0.92, 0.92, 0.95, 1.0],
-        title,
-    );
-
-    // The carried stack rides the cursor so it is obvious what is in hand.
-    if let Some(st) = carried {
-        gfx.hud.slot(
-            cursor.0 - SLOT_PX * 0.4,
-            cursor.1 - SLOT_PX * 0.4,
-            SLOT_PX * 0.8,
-            to_slot(Some(st)),
-            false,
-        );
-    }
-}
-
 impl App {
     /// Click handling for whichever panel is open. Returns true if it consumed
     /// the click.
@@ -1989,107 +1606,6 @@ impl App {
         }
         false
     }
-}
-
-/// Pick up, put down, merge, or split one stack against the carried one.
-fn swap_carried(carried: &mut Option<ItemStack>, cell: &mut Option<ItemStack>, right: bool) {
-    match (carried.take(), cell.take()) {
-        (None, Some(s)) => {
-            if right && s.count > 1 {
-                // Right click takes half and leaves the rest.
-                let half = s.count / 2;
-                *carried = Some(ItemStack::new(s.item, half));
-                *cell = Some(ItemStack::new(s.item, s.count - half));
-            } else {
-                *carried = Some(s);
-            }
-        }
-        (Some(c), None) => {
-            if right && c.count > 1 {
-                *cell = Some(ItemStack::new(c.item, 1));
-                *carried = Some(ItemStack::new(c.item, c.count - 1));
-            } else {
-                *cell = Some(c);
-            }
-        }
-        (Some(c), Some(mut s)) => {
-            if s.stacks_with(c) && !s.is_full() {
-                *carried = s.merge(c);
-                *cell = Some(s);
-            } else {
-                *cell = Some(c);
-                *carried = Some(s);
-            }
-        }
-        (None, None) => {}
-    }
-}
-
-fn merge_into_cell(cell: &mut Option<ItemStack>, stack: ItemStack) -> Option<ItemStack> {
-    match cell {
-        Some(existing) => existing.merge(stack),
-        None => {
-            *cell = Some(stack);
-            None
-        }
-    }
-}
-
-/// Store an output transactionally. If neither the inventory nor the cursor can
-/// hold it, leave both untouched so crafting or furnace output is not consumed.
-fn store_output(
-    inventory: &mut inventory::Inventory,
-    carried: &mut Option<ItemStack>,
-    output: ItemStack,
-) -> bool {
-    let mut next_inventory = inventory.clone();
-    let mut next_carried = *carried;
-    if let Some(rest) = next_inventory.add(output)
-        && merge_into_cell(&mut next_carried, rest).is_some()
-    {
-        return false;
-    }
-    *inventory = next_inventory;
-    *carried = next_carried;
-    true
-}
-
-/// Return transient panel stacks without loss. A cursor stack taken from a full
-/// furnace can always fall back into one of that furnace's now-empty input slots.
-fn return_panel_items(
-    inventory: &mut inventory::Inventory,
-    carried: &mut Option<ItemStack>,
-    craft_grid: &mut [Option<ItemStack>; 9],
-    mut furnace: Option<&mut crafting::Furnace>,
-) -> bool {
-    let pending = carried
-        .iter()
-        .chain(craft_grid.iter().flatten())
-        .copied()
-        .collect::<Vec<_>>();
-    let mut next_inventory = inventory.clone();
-    let mut next_furnace = furnace.as_deref().cloned();
-
-    for stack in pending {
-        let mut rest = next_inventory.add(stack);
-        if let (Some(left), Some(target)) = (rest, next_furnace.as_mut()) {
-            rest = merge_into_cell(&mut target.input, left);
-            if let Some(left) = rest {
-                rest = merge_into_cell(&mut target.fuel, left);
-            }
-        }
-        if rest.is_some() {
-            return false;
-        }
-    }
-
-    *inventory = next_inventory;
-    if let (Some(target), Some(next)) = (furnace.as_deref_mut(), next_furnace) {
-        *target = next;
-    }
-    *carried = None;
-    craft_grid.fill(None);
-    true
 }
 
 impl ApplicationHandler for App {
@@ -2195,12 +1711,13 @@ impl ApplicationHandler for App {
                 }
                 match button {
                     MouseButton::Left => {
-                        self.mining = pressed;
-                        if !pressed {
-                            self.mining_target = None;
+                        if pressed {
+                            self.hands.mining = true;
+                        } else {
+                            self.hands.stop();
                         }
                     }
-                    MouseButton::Right => self.placing = pressed,
+                    MouseButton::Right => self.hands.placing = pressed,
                     _ => {}
                 }
             }
@@ -2227,7 +1744,7 @@ impl ApplicationHandler for App {
                         KeyCode::Space => self.input.up = pressed,
                         KeyCode::ShiftLeft => self.input.down = pressed,
                         KeyCode::ControlLeft => self.input.fast = pressed,
-                        KeyCode::AltLeft => self.smash_mode = pressed,
+                        KeyCode::AltLeft => self.hands.smash = pressed,
                         KeyCode::F2 if pressed => {
                             if let Some(gfx) = self.gfx.as_mut() {
                                 let n = std::time::SystemTime::now()
@@ -2250,8 +1767,12 @@ impl ApplicationHandler for App {
                             if self.ui.is_panel() {
                                 self.close_panel();
                             } else {
-                                self.mining = false;
-                                self.placing = false;
+                                // Opening a panel releases the hands. This used
+                                // to clear the buttons but leave the committed
+                                // mining target set, so closing the panel and
+                                // clicking resumed on a block the player might
+                                // have walked away from.
+                                self.hands.stop();
                                 self.ui = Ui::Inventory;
                                 self.set_cursor_locked(false);
                             }
@@ -2308,18 +1829,13 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
 
-                self.fps_accum += dt;
-                self.fps_frames += 1;
-                if self.fps_accum >= 0.4 {
-                    self.fps = self.fps_frames as f32 / self.fps_accum;
-                    self.fps_accum = 0.0;
-                    self.fps_frames = 0;
+                if self.stats.note_frame(dt) {
                     if let Some(w) = &self.window
                         && self.ui != Ui::Title
                     {
                         w.set_title(&format!(
                             "Loudstone  |  {:.0} fps  |  {} chunks  |  {} mobs",
-                            self.fps,
+                            self.stats.fps,
                             self.world.chunks.len(),
                             self.mobs.mobs().len()
                         ));
@@ -2330,25 +1846,25 @@ impl ApplicationHandler for App {
 
                 // `--shot <path>`: wait for the world to finish streaming, give
                 // it a few frames to settle, capture, and quit.
-                if let Some(path) = self.shot_path.clone() {
+                if let Some(path) = self.cli.shot_path.clone() {
                     if self.ui == Ui::Title || !self.loading {
                         self.shot_countdown -= 1;
                         if self.shot_countdown == 60 {
-                            if self.models_review {
+                            if self.cli.models_review {
                                 self.run_model_review();
                             }
-                            if self.vista {
+                            if self.cli.vista {
                                 self.run_vista();
                             }
-                            if self.demo {
+                            if self.cli.demo {
                                 self.run_demo();
                             }
-                            if let Some(which) = self.ui_demo.clone() {
+                            if let Some(which) = self.cli.ui_demo.clone() {
                                 self.run_ui_demo(&which);
                             }
                         }
                         if self.shot_countdown == 2 {
-                            if let Some(which) = self.model_demo.clone() {
+                            if let Some(which) = self.cli.model_demo.clone() {
                                 self.run_model_demo(&which);
                             }
                         }
@@ -2468,21 +1984,6 @@ mod tests {
         assert!(ray_box(Vec3::new(-8.0, 1.0, 0.0), Vec3::X, min, max).is_some());
     }
 
-    #[test]
-    fn daylight_runs_a_full_cycle_from_noon_to_midnight_and_back() {
-        assert_eq!(daylight_at(0.0), 1.0);
-        assert_eq!(
-            daylight_at(DAY_LENGTH * 0.5),
-            1.0,
-            "still day at half a cycle"
-        );
-        // Deep night sits between the two twilight ramps.
-        let night = DAY_LENGTH * (DAY_FRACTION + (1.0 - DAY_FRACTION) * 0.5 + 0.02);
-        assert_eq!(daylight_at(night), 0.0);
-        // And the sky follows it in both directions.
-        assert_eq!(sky_for(1.0), SKY_COLOR);
-        assert_eq!(sky_for(0.0), SKY_NIGHT);
-    }
     // -----------------------------------------------------------------------
     // The Phase 4 acceptance criterion, as an actual test: start from nothing,
     // reach a stone pickaxe, then smelt iron. This is the whole progression the
@@ -2613,28 +2114,6 @@ mod tests {
         assert_eq!(f.fuel.map(|s| s.count), Some(1));
     }
 
-    #[test]
-    fn inventory_cursor_never_merges_or_repairs_tools() {
-        let mut carried = Some(ItemStack::worn(ItemId::IRON_PICKAXE, 200));
-        let mut cell = Some(ItemStack::worn(ItemId::IRON_PICKAXE, 75));
-
-        swap_carried(&mut carried, &mut cell, false);
-
-        assert_eq!(carried, Some(ItemStack::worn(ItemId::IRON_PICKAXE, 75)));
-        assert_eq!(cell, Some(ItemStack::worn(ItemId::IRON_PICKAXE, 200)));
-    }
-
-    #[test]
-    fn inventory_cursor_uses_each_items_stack_limit() {
-        let mut carried = Some(ItemStack::new(ItemId::COBBLESTONE, 10));
-        let mut cell = Some(ItemStack::new(ItemId::COBBLESTONE, 60));
-
-        swap_carried(&mut carried, &mut cell, false);
-
-        assert_eq!(cell.map(|s| s.count), Some(ItemId::COBBLESTONE.max_stack()));
-        assert_eq!(carried.map(|s| s.count), Some(6));
-    }
-
     /// The duplication exploit, stated as a test: mine a furnace, and its
     /// contents must not survive to be inherited by the next one built there.
     #[test]
@@ -2670,8 +2149,7 @@ mod tests {
     fn a_furnace_that_is_still_standing_is_left_alone() {
         let pos = (8, 64, -4);
         let mut furnaces = HashMap::from([(pos, crafting::Furnace::new())]);
-        let salvage =
-            forget_orphan_furnaces(&mut furnaces, pos, pos, |_, _, _| BlockId::FURNACE);
+        let salvage = forget_orphan_furnaces(&mut furnaces, pos, pos, |_, _, _| BlockId::FURNACE);
         assert_eq!(furnaces.len(), 1);
         assert!(salvage.is_empty());
     }
@@ -2684,7 +2162,9 @@ mod tests {
     fn a_furnace_outside_the_swept_region_is_never_touched() {
         let far = (900, 64, -900);
         let mut furnaces = HashMap::from([(far, crafting::Furnace::new())]);
-        forget_orphan_furnaces(&mut furnaces, (0, 0, 0), (16, 80, 16), |_, _, _| BlockId::AIR);
+        forget_orphan_furnaces(&mut furnaces, (0, 0, 0), (16, 80, 16), |_, _, _| {
+            BlockId::AIR
+        });
         assert_eq!(
             furnaces.len(),
             1,
@@ -2790,24 +2270,6 @@ mod tests {
             BlockId::PLANKS
         );
         assert!(replayed.contains(&pos));
-    }
-
-    #[test]
-    fn output_collection_never_overwrites_an_incompatible_carried_stack() {
-        let mut inventory = inventory::Inventory::new();
-        for index in 0..inventory::SLOT_COUNT {
-            inventory.set_slot(index, Some(ItemStack::new(ItemId::DIRT, 64)));
-        }
-        let held = ItemStack::worn(ItemId::IRON_PICKAXE, 71);
-        let mut carried = Some(held);
-
-        assert!(!store_output(
-            &mut inventory,
-            &mut carried,
-            ItemStack::new(ItemId::IRON_INGOT, 1)
-        ));
-        assert_eq!(carried, Some(held));
-        assert_eq!(inventory.count(ItemId::IRON_INGOT), 0);
     }
 
     #[test]

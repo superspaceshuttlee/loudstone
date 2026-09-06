@@ -96,7 +96,11 @@ project's history were invisible to tests and obvious in a screenshot.
 
 | File | Responsibility |
 |---|---|
-| `main.rs` | Window, event loop, `App` state, and all wiring between systems |
+| `main.rs` | Window, event loop, `App` state, and the wiring between systems |
+| `cli.rs` | Command-line options, parsed once into one `Cli` value |
+| `session.rs` | `Hands` (what the player is doing) and `Stats` (counters) |
+| `ui.rs` | Menu and panel layout, drawing, and the stack-moving rules |
+| `daylight.rs` | The day/night cycle: brightness, sky colour, sun direction |
 | `config.rs` | **Every tunable number.** Look/feel, physics, mining rates, streaming budgets |
 | `world.rs` | Chunk map, threaded streaming, raycast, carving, block queries |
 | `chunk.rs` | Chunk storage and the sparse sub-voxel damage masks |
@@ -279,6 +283,31 @@ In roughly the order they would pay off:
 10. **Shipping shell** — settings menu, keybind remapping, graphics options, CI,
     installer, exe icon, crash reporting.
 
-Structurally, the largest remaining issue is that `main.rs` holds an `App` with
-50-odd fields. A real engine would use an ECS or split this into systems with
-their own state. It has not hurt yet; it will.
+Structurally, `main.rs` still holds an `App` with 39 fields. That is down from
+58: launch flags became `cli.rs`, the panel layer became `ui.rs`, the day cycle
+became `daylight.rs`, and the loose interaction timers and counters became
+`Hands` and `Stats` in `session.rs`.
+
+That refactor was not cosmetic, and the reason is worth keeping in mind for the
+next one. `mining`, `placing` and `mining_target` were three independent-looking
+booleans, but they are not independent -- releasing the button must clear the
+committed target, or the next swing quietly resumes on a block the player has
+walked away from. Two of the four places that released the hands got that wrong,
+because nothing in a flat struct says the three fields belong together. Moving
+them into `Hands` with a `stop()` gave the rule one home and fixed both sites.
+
+What is left to group, in the order it will hurt:
+
+- **Persistence** (`data`, `save_path`, `has_save`, `time_since_save`,
+  `replayed`, `furnaces`) -- the boundary bugs found so far all lived here:
+  furnace contents outliving their block, items lost on close. There is still no
+  type that says "this is the set of things that must be saved together".
+- **Panel state** (`ui`, `craft_grid`, `carried`, `cursor`, `cursor_locked`) --
+  `carried` is a live item stack held outside the inventory, so any path that
+  closes a panel without returning it destroys items.
+- **Frame/loop** (`window`, `gfx`, `last_frame`, `last_frame_at`, `loading`,
+  `load_frames`, `start`).
+
+Beyond that, a real engine would use an ECS. That is a bigger decision than a
+field regrouping and should wait until there is a second entity type that wants
+components the mob system does not have.

@@ -399,18 +399,8 @@ fn emit_cross_block(
     let planes = [
         // Corners run bottom-left, bottom-right, top-right, top-left so the
         // texture stands upright on both diagonals.
-        [
-            [lo, 0.0, lo],
-            [hi, 0.0, hi],
-            [hi, 1.0, hi],
-            [lo, 1.0, lo],
-        ],
-        [
-            [hi, 0.0, lo],
-            [lo, 0.0, hi],
-            [lo, 1.0, hi],
-            [hi, 1.0, lo],
-        ],
+        [[lo, 0.0, lo], [hi, 0.0, hi], [hi, 1.0, hi], [lo, 1.0, lo]],
+        [[hi, 0.0, lo], [lo, 0.0, hi], [lo, 1.0, hi], [hi, 1.0, lo]],
     ];
 
     for plane in planes {

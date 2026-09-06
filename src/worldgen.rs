@@ -898,7 +898,6 @@ impl TerrainGen {
 
     // --- noise helpers ------------------------------------------------------
 
-
     /// Fractal sum of a 2D noise source, normalised to roughly -1..1.
     ///
     /// Each octave is **rotated and offset** before it is sampled, and the
@@ -964,7 +963,7 @@ impl TerrainGen {
         let (x, z) = (x + wx * amp, z + wz * amp);
         let mut sum = 0.0;
         let mut amp = 1.0;
-        let mut freq = scale;
+        let freq = scale;
         let mut norm = 0.0;
         // See `fbm2`: ridged noise shows lattice alignment even more plainly,
         // because a crest lands exactly where the source crosses zero and
@@ -1092,7 +1091,13 @@ impl TerrainGen {
         // Ledges and shoulders on mountain rock, so a steep face is a series of
         // benches rather than one unbroken ramp.
         if mountainness > 0.0 {
-            let ledge = Self::fbm2(&self.detail, xf + 5000.0, zf - 9000.0, t::LEDGE_SCALE, t::LEDGE_OCTAVES);
+            let ledge = Self::fbm2(
+                &self.detail,
+                xf + 5000.0,
+                zf - 9000.0,
+                t::LEDGE_SCALE,
+                t::LEDGE_OCTAVES,
+            );
             h += ledge * t::LEDGE_AMP * mountainness;
         }
 
@@ -2372,7 +2377,15 @@ mod tests {
         // kind of false failure that gets a real test deleted.
         let mut world = HashMap::new();
         let mut base = (0i32, 0i32);
-        for &(cx0, cz0) in &[(0, 0), (6, 0), (0, 6), (-6, 4), (12, -8), (-14, -14), (20, 20)] {
+        for &(cx0, cz0) in &[
+            (0, 0),
+            (6, 0),
+            (0, 6),
+            (-6, 4),
+            (12, -8),
+            (-14, -14),
+            (20, 20),
+        ] {
             let candidate = stitch(cx0, cz0);
             let logs = candidate.values().filter(|b| b.is_log()).count();
             if logs > 20 {
@@ -2381,7 +2394,10 @@ mod tests {
                 break;
             }
         }
-        assert!(!world.is_empty(), "no forested patch found anywhere to test");
+        assert!(
+            !world.is_empty(),
+            "no forested patch found anywhere to test"
+        );
 
         // Only judge trunks well inside the stitched region, so "missing" never
         // means "outside the generated box".
@@ -2604,7 +2620,9 @@ mod tests {
         let Some((x, z, uniformity, distinct)) = worst else {
             panic!("no steep transect found to judge");
         };
-        println!("steepest transect at {x},{z}: {uniformity:.2} uniform, {distinct} distinct steps");
+        println!(
+            "steepest transect at {x},{z}: {uniformity:.2} uniform, {distinct} distinct steps"
+        );
         assert!(
             uniformity < 0.75 && distinct >= 3,
             "slope at {x},{z} is a regular staircase: {:.0}% of steps identical,              only {distinct} distinct step sizes",
@@ -2931,7 +2949,10 @@ mod ravine_shape {
         }
 
         let fraction = active as f64 / total as f64;
-        println!("ravine coverage {:.3}%, widest crossing {worst_run} blocks", fraction * 100.0);
+        println!(
+            "ravine coverage {:.3}%, widest crossing {worst_run} blocks",
+            fraction * 100.0
+        );
         assert!(
             fraction < 0.05,
             "ravines cover {:.1}% of the world, which is a crater field, not slots",

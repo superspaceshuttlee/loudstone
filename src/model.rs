@@ -214,8 +214,7 @@ fn part_rotation(ch: Channel, p: &Pose) -> Vec3 {
             // points (0,-1,0), and rotating that about +X by -90 degrees sends
             // it to +Z, which is the model's BACK. Forward is +90.
             let forward = std::f32::consts::FRAC_PI_2 * p.arms_forward;
-            let x = forward - swing * side * 0.6 * (1.0 - p.arms_forward * 0.7)
-                - p.attack * 1.2;
+            let x = forward - swing * side * 0.6 * (1.0 - p.arms_forward * 0.7) - p.attack * 1.2;
             // A slight outward splay stops the arms clipping the torso.
             Vec3::new(x, 0.0, side * 0.06 * (1.0 - p.arms_forward))
         }
@@ -263,7 +262,8 @@ pub fn append(
     let body = body_rotation(yaw);
     for part in parts {
         let rot = part_rotation(part.channel, pose);
-        let local = Mat3::from_rotation_y(rot.y) * Mat3::from_rotation_x(rot.x)
+        let local = Mat3::from_rotation_y(rot.y)
+            * Mat3::from_rotation_x(rot.x)
             * Mat3::from_rotation_z(rot.z);
         let pivot = Vec3::new(part.pivot.0, part.pivot.1, part.pivot.2);
         let centre = Vec3::new(part.offset.0, part.offset.1, part.offset.2);
@@ -306,11 +306,26 @@ pub fn append(
 /// face order the mesher and the skin layout use.
 const FACE_CORNERS: [[[f32; 3]; 4]; 6] = [
     [[-1., 1., -1.], [-1., 1., 1.], [1., 1., 1.], [1., 1., -1.]], // top
-    [[-1., -1., 1.], [-1., -1., -1.], [1., -1., -1.], [1., -1., 1.]], // bottom
+    [
+        [-1., -1., 1.],
+        [-1., -1., -1.],
+        [1., -1., -1.],
+        [1., -1., 1.],
+    ], // bottom
     [[1., -1., 1.], [-1., -1., 1.], [-1., 1., 1.], [1., 1., 1.]], // +Z back
-    [[-1., -1., -1.], [1., -1., -1.], [1., 1., -1.], [-1., 1., -1.]], // -Z face
+    [
+        [-1., -1., -1.],
+        [1., -1., -1.],
+        [1., 1., -1.],
+        [-1., 1., -1.],
+    ], // -Z face
     [[1., -1., -1.], [1., -1., 1.], [1., 1., 1.], [1., 1., -1.]], // +X
-    [[-1., -1., 1.], [-1., -1., -1.], [-1., 1., -1.], [-1., 1., 1.]], // -X
+    [
+        [-1., -1., 1.],
+        [-1., -1., -1.],
+        [-1., 1., -1.],
+        [-1., 1., 1.],
+    ], // -X
 ];
 
 /// Where a box corner lands in its face's rectangle, derived from the corner's
@@ -325,12 +340,12 @@ fn face_uv(face: usize, c: [f32; 3]) -> [f32; 2] {
     // Box corners are -1..1; map to 0..1 first.
     let (x, y, z) = ((c[0] + 1.0) * 0.5, (c[1] + 1.0) * 0.5, (c[2] + 1.0) * 0.5);
     match face {
-        0 => [x, z],               // +Y top
-        1 => [x, 1.0 - z],         // -Y bottom
-        2 => [1.0 - x, 1.0 - y],   // +Z back
-        3 => [x, 1.0 - y],         // -Z front
-        4 => [z, 1.0 - y],         // +X
-        _ => [1.0 - z, 1.0 - y],   // -X
+        0 => [x, z],             // +Y top
+        1 => [x, 1.0 - z],       // -Y bottom
+        2 => [1.0 - x, 1.0 - y], // +Z back
+        3 => [x, 1.0 - y],       // -Z front
+        4 => [z, 1.0 - y],       // +X
+        _ => [1.0 - z, 1.0 - y], // -X
     }
 }
 
@@ -344,17 +359,27 @@ mod tests {
     #[test]
     fn the_humanoid_is_six_boxes_and_thirty_two_texels_tall() {
         let p = humanoid();
-        assert_eq!(p.len(), 6, "detail belongs in the skin, not in more cuboids");
+        assert_eq!(
+            p.len(),
+            6,
+            "detail belongs in the skin, not in more cuboids"
+        );
         let top = p
             .iter()
             .map(|q| q.offset.1 + q.size.1 as f32 * 0.5)
             .fold(f32::MIN, f32::max);
-        assert!((top - 32.0).abs() < 0.01, "model should stand 32 texels tall, got {top}");
+        assert!(
+            (top - 32.0).abs() < 0.01,
+            "model should stand 32 texels tall, got {top}"
+        );
         let bottom = p
             .iter()
             .map(|q| q.offset.1 - q.size.1 as f32 * 0.5)
             .fold(f32::MAX, f32::min);
-        assert!(bottom.abs() < 0.01, "feet should sit at the origin, got {bottom}");
+        assert!(
+            bottom.abs() < 0.01,
+            "feet should sit at the origin, got {bottom}"
+        );
     }
 
     #[test]
@@ -373,7 +398,11 @@ mod tests {
 
     #[test]
     fn a_standing_mob_does_not_swing_its_limbs() {
-        let still = Pose { stride: 3.0, speed: 0.0, ..Default::default() };
+        let still = Pose {
+            stride: 3.0,
+            speed: 0.0,
+            ..Default::default()
+        };
         for ch in [Channel::ArmRight, Channel::LegLeft] {
             let r = part_rotation(ch, &still);
             assert!(r.x.abs() < 1.0e-6, "{ch:?} moved while standing still");
@@ -382,7 +411,11 @@ mod tests {
 
     #[test]
     fn arms_and_legs_swing_in_opposition() {
-        let walking = Pose { stride: 0.7, speed: 1.0, ..Default::default() };
+        let walking = Pose {
+            stride: 0.7,
+            speed: 1.0,
+            ..Default::default()
+        };
         let arm = part_rotation(Channel::ArmRight, &walking).x;
         let leg = part_rotation(Channel::LegRight, &walking).x;
         assert!(
@@ -393,7 +426,10 @@ mod tests {
 
     #[test]
     fn zombie_arms_are_held_out_in_front() {
-        let z = Pose { arms_forward: 1.0, ..Default::default() };
+        let z = Pose {
+            arms_forward: 1.0,
+            ..Default::default()
+        };
         let arm = part_rotation(Channel::ArmRight, &z).x;
         assert!(
             (arm - std::f32::consts::FRAC_PI_2).abs() < 0.2,
@@ -420,7 +456,10 @@ mod tests {
     fn forward_held_arms_point_the_way_the_model_faces() {
         // Arms held forward must end up on the same side as the face, not out
         // the back. Both are -Z in model space, so they have to agree.
-        let z = Pose { arms_forward: 1.0, ..Default::default() };
+        let z = Pose {
+            arms_forward: 1.0,
+            ..Default::default()
+        };
         let rot = part_rotation(Channel::ArmRight, &z);
         let hanging = Vec3::new(0.0, -1.0, 0.0);
         let pointed = Mat3::from_rotation_x(rot.x) * hanging;
@@ -459,9 +498,15 @@ mod tests {
             .filter(|p| !matches!(p.channel, Channel::Head | Channel::Body))
             .count();
         assert_eq!(legs, 4);
-        for p in parts.iter().filter(|p| !matches!(p.channel, Channel::Head | Channel::Body)) {
+        for p in parts
+            .iter()
+            .filter(|p| !matches!(p.channel, Channel::Head | Channel::Body))
+        {
             let bottom = p.offset.1 - p.size.1 as f32 * 0.5;
-            assert!(bottom.abs() < 0.01, "a leg should reach the ground, got {bottom}");
+            assert!(
+                bottom.abs() < 0.01,
+                "a leg should reach the ground, got {bottom}"
+            );
         }
     }
 
@@ -485,7 +530,10 @@ mod tests {
                 du.abs() > 0.9,
                 "face {face}: texture width should follow axis {along}, du={du}"
             );
-            assert!(dv.abs() > 0.9, "face {face}: texture height should follow y, dv={dv}");
+            assert!(
+                dv.abs() > 0.9,
+                "face {face}: texture height should follow y, dv={dv}"
+            );
         }
     }
 
@@ -521,12 +569,23 @@ mod tests {
             Vec3::ZERO,
             0.0,
             1.0,
-            &Pose { stride: 1.0, speed: 1.0, arms_forward: 1.0, ..Default::default() },
+            &Pose {
+                stride: 1.0,
+                speed: 1.0,
+                arms_forward: 1.0,
+                ..Default::default()
+            },
             1.0,
         );
         let top = v.iter().map(|x| x.pos[1]).fold(f32::MIN, f32::max);
         let bottom = v.iter().map(|x| x.pos[1]).fold(f32::MAX, f32::min);
-        assert!(top <= 2.05, "a humanoid should be about 2 blocks tall, got {top}");
-        assert!(bottom >= -0.7, "limbs should not swing far below the feet, got {bottom}");
+        assert!(
+            top <= 2.05,
+            "a humanoid should be about 2 blocks tall, got {top}"
+        );
+        assert!(
+            bottom >= -0.7,
+            "limbs should not swing far below the feet, got {bottom}"
+        );
     }
 }

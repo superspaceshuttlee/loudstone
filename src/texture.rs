@@ -449,7 +449,6 @@ pub fn atlas() -> &'static Atlas {
     ATLAS.get_or_init(build_atlas)
 }
 
-
 // ---------------------------------------------------------------------------
 // Mob skins
 // ---------------------------------------------------------------------------
@@ -492,12 +491,12 @@ pub fn box_face_rects(uv: (usize, usize), size: (usize, usize, usize)) -> [[usiz
     let (u, v) = uv;
     let (w, h, d) = size;
     [
-        [u + d, v, w, d],                 // top
-        [u + d + w, v, w, d],             // bottom
-        [u + d + w + d, v + d, w, h],     // +Z, the back
-        [u + d, v + d, w, h],             // -Z, the face
-        [u, v + d, d, h],                 // +X
-        [u + d + w, v + d, d, h],         // -X
+        [u + d, v, w, d],             // top
+        [u + d + w, v, w, d],         // bottom
+        [u + d + w + d, v + d, w, h], // +Z, the back
+        [u + d, v + d, w, h],         // -Z, the face
+        [u, v + d, d, h],             // +X
+        [u + d + w, v + d, d, h],     // -X
     ]
 }
 
@@ -520,7 +519,9 @@ struct Skin {
 
 impl Skin {
     fn new() -> Self {
-        Skin { px: vec![[0, 0, 0, 0]; SKIN_SIZE * SKIN_SIZE] }
+        Skin {
+            px: vec![[0, 0, 0, 0]; SKIN_SIZE * SKIN_SIZE],
+        }
     }
     fn set(&mut self, x: usize, y: usize, c: Rgba) {
         if x < SKIN_SIZE && y < SKIN_SIZE {
@@ -599,10 +600,30 @@ pub const QUAD_LEG_SIZE: (usize, usize, usize) = (4, 6, 4);
 fn paint_skin(which: usize, sk: &mut Skin) {
     // Palettes chosen to sit beside the block atlas rather than shout over it.
     let (skin_c, shirt_c, trouser_c, seed) = match which {
-        SKIN_ZOMBIE => ([0x4C, 0x7A, 0x3F, 255], [0x3A, 0x4E, 0x74, 255], [0x2E, 0x3A, 0x52, 255], 11),
-        SKIN_SKELETON => ([0xC8, 0xC8, 0xBE, 255], [0xB4, 0xB4, 0xAA, 255], [0xA8, 0xA8, 0x9E, 255], 23),
-        SKIN_CREEPER => ([0x4F, 0xB5, 0x45, 255], [0x45, 0xA0, 0x3C, 255], [0x3C, 0x8C, 0x34, 255], 37),
-        _ => ([0xE6, 0x9A, 0xA0, 255], [0xDD, 0x8E, 0x95, 255], [0xC9, 0x7B, 0x82, 255], 53),
+        SKIN_ZOMBIE => (
+            [0x4C, 0x7A, 0x3F, 255],
+            [0x3A, 0x4E, 0x74, 255],
+            [0x2E, 0x3A, 0x52, 255],
+            11,
+        ),
+        SKIN_SKELETON => (
+            [0xC8, 0xC8, 0xBE, 255],
+            [0xB4, 0xB4, 0xAA, 255],
+            [0xA8, 0xA8, 0x9E, 255],
+            23,
+        ),
+        SKIN_CREEPER => (
+            [0x4F, 0xB5, 0x45, 255],
+            [0x45, 0xA0, 0x3C, 255],
+            [0x3C, 0x8C, 0x34, 255],
+            37,
+        ),
+        _ => (
+            [0xE6, 0x9A, 0xA0, 255],
+            [0xDD, 0x8E, 0x95, 255],
+            [0xC9, 0x7B, 0x82, 255],
+            53,
+        ),
     };
 
     if which == SKIN_PIG {
@@ -667,12 +688,29 @@ fn paint_skin(which: usize, sk: &mut Skin) {
     if which == SKIN_CREEPER {
         // The creeper's face is its whole identity: two square eyes and a
         // frowning mouth, all hard-edged.
-        for (x, y) in [(1, 2), (2, 2), (1, 3), (2, 3), (5, 2), (6, 2), (5, 3), (6, 3)] {
+        for (x, y) in [
+            (1, 2),
+            (2, 2),
+            (1, 3),
+            (2, 3),
+            (5, 2),
+            (6, 2),
+            (5, 3),
+            (6, 3),
+        ] {
             sk.set(fx + x, fy + y, eye_glow);
         }
         for (x, y) in [
-            (3, 4), (4, 4), (3, 5), (4, 5), (2, 5), (5, 5),
-            (2, 6), (3, 6), (4, 6), (5, 6),
+            (3, 4),
+            (4, 4),
+            (3, 5),
+            (4, 5),
+            (2, 5),
+            (5, 5),
+            (2, 6),
+            (3, 6),
+            (4, 6),
+            (5, 6),
         ] {
             sk.set(fx + x, fy + y, eye_glow);
         }
@@ -708,7 +746,10 @@ fn paint_skin(which: usize, sk: &mut Skin) {
                 sk.set(front[0] + x, y, shade_i(shirt_c, -55));
             }
         }
-        for r in [box_face_rects(ARM_R_UV, ARM_SIZE)[3], box_face_rects(ARM_L_UV, ARM_SIZE)[3]] {
+        for r in [
+            box_face_rects(ARM_R_UV, ARM_SIZE)[3],
+            box_face_rects(ARM_L_UV, ARM_SIZE)[3],
+        ] {
             for y in 0..r[3] {
                 sk.set(r[0] + 1, r[1] + y, shade_i(skin_c, -45));
                 sk.set(r[0] + r[2] - 2, r[1] + y, shade_i(skin_c, -45));
