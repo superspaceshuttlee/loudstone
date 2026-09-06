@@ -1379,6 +1379,17 @@ impl MobManager {
             if (pos - player.pos).length() < SPAWN_MIN_DISTANCE {
                 continue;
             }
+            // Leaves are solid enough to stand on, which is Minecraft-correct
+            // but puts pigs in treetops. Ground worth spawning on is ground.
+            let under = world.block_at(cell.x, cell.y - 1, cell.z);
+            if matches!(
+                under,
+                crate::block::BlockId::LEAVES
+                    | crate::block::BlockId::BIRCH_LEAVES
+                    | crate::block::BlockId::SPRUCE_LEAVES
+            ) {
+                continue;
+            }
             let dark = is_dark(world, cell, daylight);
 
             if dark && want_hostile && self.hostile_count() < HOSTILE_CAP {

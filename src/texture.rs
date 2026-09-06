@@ -590,6 +590,8 @@ pub const QUAD_HEAD_UV: (usize, usize) = (0, 0);
 pub const QUAD_HEAD_SIZE: (usize, usize, usize) = (8, 8, 8);
 pub const QUAD_BODY_UV: (usize, usize) = (0, 16);
 pub const QUAD_BODY_SIZE: (usize, usize, usize) = (10, 8, 16);
+pub const QUAD_SNOUT_UV: (usize, usize) = (34, 44);
+pub const QUAD_SNOUT_SIZE: (usize, usize, usize) = (4, 3, 2);
 pub const QUAD_LEG_UV: (usize, usize) = (0, 44);
 pub const QUAD_LEG_SIZE: (usize, usize, usize) = (4, 8, 4);
 
@@ -744,6 +746,11 @@ fn paint_quadruped(sk: &mut Skin, hide: Rgba, belly: Rgba, seed: u32) {
     sk.box_all(QUAD_HEAD_UV, QUAD_HEAD_SIZE, hide, seed);
     sk.box_all(QUAD_BODY_UV, QUAD_BODY_SIZE, hide, seed ^ 1);
     sk.box_all(QUAD_LEG_UV, QUAD_LEG_SIZE, belly, seed ^ 2);
+    sk.box_all(QUAD_SNOUT_UV, QUAD_SNOUT_SIZE, shade_i(hide, 20), seed ^ 4);
+    // Nostrils on the snout's front face.
+    let sn = box_face_rects(QUAD_SNOUT_UV, QUAD_SNOUT_SIZE)[3];
+    sk.set(sn[0] + 1, sn[1] + 1, [0x5A, 0x35, 0x3A, 255]);
+    sk.set(sn[0] + 2, sn[1] + 1, [0x5A, 0x35, 0x3A, 255]);
 
     // The underside is paler, as on a real animal, and it is the one cue that
     // reads the body as a barrel rather than a slab.
@@ -773,14 +780,8 @@ fn paint_quadruped(sk: &mut Skin, hide: Rgba, belly: Rgba, seed: u32) {
     for (ex, ey) in [(1usize, 2usize), (6, 2)] {
         sk.set(f[0] + ex, f[1] + ey, dark);
     }
-    let snout = shade_i(hide, 22);
-    for x in 2..6 {
-        for y in 4..7 {
-            sk.set(f[0] + x, f[1] + y, snout);
-        }
-    }
-    sk.set(f[0] + 3, f[1] + 5, dark);
-    sk.set(f[0] + 4, f[1] + 5, dark);
+    // No painted snout: it is a real box now, and painting one behind it only
+    // showed through as a smudge.
 }
 
 /// All four skins, painted once and reused.

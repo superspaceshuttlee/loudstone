@@ -103,12 +103,22 @@ pub fn humanoid() -> &'static [Part] {
 /// both -- the torso rectangle simply wraps a longer box.
 pub fn quadruped() -> &'static [Part] {
     use texture::*;
-    const PARTS: [Part; 6] = [
+    const PARTS: [Part; 7] = [
         Part {
             channel: Channel::Head,
             uv: QUAD_HEAD_UV,
             size: QUAD_HEAD_SIZE,
             offset: (0.0, 12.0, -10.0),
+            pivot: (0.0, 12.0, -8.0),
+        },
+        // A snout is one of the few places geometry genuinely beats texture: a
+        // painted-on nose reads as a smudge, a box that sticks out reads as a
+        // face. It rides the head channel so it turns with it.
+        Part {
+            channel: Channel::Head,
+            uv: QUAD_SNOUT_UV,
+            size: QUAD_SNOUT_SIZE,
+            offset: (0.0, 10.0, -15.0),
             pivot: (0.0, 12.0, -8.0),
         },
         Part {

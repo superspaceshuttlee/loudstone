@@ -356,12 +356,82 @@ pub fn mesh_chunk(nb: &Neighborhood) -> (Vec<Vertex>, Vec<u32>) {
                     Some(mask) => {
                         emit_subvoxel_block(nb, &mut verts, &mut indices, x, y, z, id, mask)
                     }
+                    None if id.is_cross() => {
+                        emit_cross_block(nb, &mut verts, &mut indices, x, y, z, id)
+                    }
                     None => emit_full_block(nb, &mut verts, &mut indices, x, y, z, id),
                 }
             }
         }
     }
     (verts, indices)
+}
+
+/// Grass tufts, flowers and dead bushes, drawn as two quads crossed in an X.
+///
+/// Drawing these as full cubes is what made a field of grass read as noise: a
+/// cube is six faces of solid texture where a plant should be a thin sprite you
+/// can see past. Two crossed quads is what every block game uses, and it is
+/// cheaper as well -- four faces instead of six, and no neighbour ever has to
+/// consider them.
+///
+/// The quads are emitted twice with opposite winding because the terrain
+/// pipeline culls back faces and a plant must be visible from both sides.
+fn emit_cross_block(
+    nb: &Neighborhood,
+    verts: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    x: i32,
+    y: i32,
+    z: i32,
+    id: BlockId,
+) {
+    let (ox, oy, oz) = nb.origin;
+    let (wx, wy, wz) = ((ox + x) as f32, (oy + y) as f32, (oz + z) as f32);
+    // Inset slightly so a plant never z-fights the block it stands on.
+    let (lo, hi) = (0.1464, 0.8536);
+    let rect = crate::texture::tile_uv_rect(crate::texture::block_tile(id, 3));
+
+    // Plants are lit by the cell they occupy; they cast no ambient occlusion of
+    // their own, so a flat light keeps them from flickering as they sway.
+    let l = nb.flat_light(x, y, z).max(0.25);
+
+    let planes = [
+        // Corners run bottom-left, bottom-right, top-right, top-left so the
+        // texture stands upright on both diagonals.
+        [
+            [lo, 0.0, lo],
+            [hi, 0.0, hi],
+            [hi, 1.0, hi],
+            [lo, 1.0, lo],
+        ],
+        [
+            [hi, 0.0, lo],
+            [lo, 0.0, hi],
+            [lo, 1.0, hi],
+            [hi, 1.0, lo],
+        ],
+    ];
+
+    for plane in planes {
+        let mut corners = [[0.0f32; 3]; 4];
+        let mut uvs = [[0.0f32; 2]; 4];
+        for (i, c) in plane.iter().enumerate() {
+            corners[i] = [wx + c[0], wy + c[1], wz + c[2]];
+            // u follows the quad's length, v its height, top of the tile up.
+            let u = if i == 0 || i == 3 { 0.0 } else { 1.0 };
+            let v = if c[1] > 0.5 { 0.0 } else { 1.0 };
+            uvs[i] = [
+                rect[0] + (rect[2] - rect[0]) * u,
+                rect[1] + (rect[3] - rect[1]) * v,
+            ];
+        }
+        push_quad(verts, indices, corners, NO_TINT, [l; 4], uvs);
+        // The same quad wound the other way, so it is not culled from behind.
+        let flipped = [corners[3], corners[2], corners[1], corners[0]];
+        let flipped_uv = [uvs[3], uvs[2], uvs[1], uvs[0]];
+        push_quad(verts, indices, flipped, NO_TINT, [l; 4], flipped_uv);
+    }
 }
 
 fn push_quad(

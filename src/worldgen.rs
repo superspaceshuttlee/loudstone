@@ -192,8 +192,9 @@ pub mod tuning {
 
     pub const RAVINE_SCALE: f64 = 0.0042;
     pub const RAVINE_OCTAVES: u32 = 2;
-    /// Half-width in noise units. Narrow: ravines should be rare landmarks.
-    pub const RAVINE_WIDTH: f64 = 0.030;
+    /// Half-width in BLOCKS. Measured as a real distance rather than a noise
+    /// value, so a ravine is the same width wherever it runs.
+    pub const RAVINE_HALF_WIDTH: f64 = 4.5;
     pub const RAVINE_MIN_Y: i32 = 10;
     /// Strength x profile must clear this for a block to be cut away.
     pub const RAVINE_CUT: f32 = 0.34;
@@ -283,7 +284,7 @@ pub mod tuning {
             amp: 1.00,
             tree: TreeKind::Spruce,
             tree_chance: 0.44,
-            plant_chance: 0.09,
+            plant_chance: 0.05,
             flower_chance: 0.01,
             top: BlockId::GRASS_COLD,
             filler: BlockId::DIRT,
@@ -295,7 +296,7 @@ pub mod tuning {
             amp: 0.42,
             tree: TreeKind::Oak,
             tree_chance: 0.04,
-            plant_chance: 0.30,
+            plant_chance: 0.12,
             flower_chance: 0.055,
             top: BlockId::GRASS,
             filler: BlockId::DIRT,
@@ -307,7 +308,7 @@ pub mod tuning {
             amp: 0.82,
             tree: TreeKind::Oak,
             tree_chance: 0.58,
-            plant_chance: 0.18,
+            plant_chance: 0.08,
             flower_chance: 0.035,
             top: BlockId::GRASS,
             filler: BlockId::DIRT,
@@ -319,7 +320,7 @@ pub mod tuning {
             amp: 0.16,
             tree: TreeKind::Oak,
             tree_chance: 0.14,
-            plant_chance: 0.26,
+            plant_chance: 0.10,
             flower_chance: 0.005,
             top: BlockId::GRASS_SWAMP,
             filler: BlockId::DIRT,
@@ -331,7 +332,7 @@ pub mod tuning {
             amp: 0.52,
             tree: TreeKind::Oak,
             tree_chance: 0.05,
-            plant_chance: 0.32,
+            plant_chance: 0.13,
             flower_chance: 0.01,
             top: BlockId::GRASS_DRY,
             filler: BlockId::DIRT,
@@ -1002,7 +1003,23 @@ impl TerrainGen {
                 t::SPAWN_CLEAR_RADIUS as f64 * 3.0,
                 d,
             );
-            ((1.0 - smoothstep64(0.0, t::RAVINE_WIDTH, rav_n.abs())) * keep) as f32
+            // Distance to the ravine's centre line, not the raw noise value.
+            //
+            // Thresholding |noise| alone looks like it carves a winding slot and
+            // does so almost everywhere -- but wherever the field flattens out
+            // near zero, the band satisfying |n| < width balloons into an
+            // enormous round pit. That is where the giant craters came from.
+            // Dividing by the local gradient converts the noise into an
+            // approximate distance in blocks, which is constant-width by
+            // construction and has no plateaus to blow up.
+            let e = 2.0;
+            let gx = Self::fbm2(&self.ravine, xf + e, zf, t::RAVINE_SCALE, t::RAVINE_OCTAVES)
+                - Self::fbm2(&self.ravine, xf - e, zf, t::RAVINE_SCALE, t::RAVINE_OCTAVES);
+            let gz = Self::fbm2(&self.ravine, xf, zf + e, t::RAVINE_SCALE, t::RAVINE_OCTAVES)
+                - Self::fbm2(&self.ravine, xf, zf - e, t::RAVINE_SCALE, t::RAVINE_OCTAVES);
+            let grad = (((gx * gx + gz * gz).sqrt()) / (2.0 * e)).max(1.0e-9);
+            let dist_blocks = rav_n.abs() / grad;
+            ((1.0 - smoothstep64(0.0, t::RAVINE_HALF_WIDTH, dist_blocks)) * keep) as f32
         } else {
             0.0
         };
@@ -2631,6 +2648,56 @@ mod tests {
             per < 3.0e-3,
             "generation costs {:.0} us/chunk, which will not stream in time",
             per * 1e6
+        );
+    }
+}
+
+#[cfg(test)]
+mod ravine_shape {
+    use super::*;
+
+    /// A ravine must be a narrow slot, not a crater.
+    ///
+    /// The original test was `|noise| < width`, which carves a winding slot
+    /// almost everywhere -- but wherever the noise field flattens out near
+    /// zero, the qualifying band balloons into an enormous round pit. Measuring
+    /// the area they occupy catches exactly that: a slot covers a sliver of the
+    /// map, a crater field covers a great deal of it.
+    #[test]
+    fn ravines_are_slots_rather_than_craters() {
+        let g = TerrainGen::new(4242);
+        let (mut active, mut total) = (0usize, 0usize);
+        let mut worst_run = 0usize;
+
+        let mut z = -600;
+        while z < 600 {
+            let mut run = 0usize;
+            for x in -600..600 {
+                let col = g.column(x, z);
+                total += 1;
+                if col.ravine > tuning::RAVINE_CUT {
+                    active += 1;
+                    run += 1;
+                    worst_run = worst_run.max(run);
+                } else {
+                    run = 0;
+                }
+            }
+            z += 7;
+        }
+
+        let fraction = active as f64 / total as f64;
+        println!("ravine coverage {:.3}%, widest crossing {worst_run} blocks", fraction * 100.0);
+        assert!(
+            fraction < 0.05,
+            "ravines cover {:.1}% of the world, which is a crater field, not slots",
+            fraction * 100.0
+        );
+        // A slot crossed at a glancing angle is legitimately wide, but nothing
+        // should be a hundred blocks across.
+        assert!(
+            worst_run < 90,
+            "widest ravine crossing is {worst_run} blocks, which is a pit"
         );
     }
 }
