@@ -13,6 +13,17 @@
 //! tools -- be tested directly, without a window or a world.
 
 use crate::Ui;
+use crate::item::ItemId;
+use crate::texture::{self, TileId};
+
+/// Item art is drawn at full brightness; the tint exists for biome-coloured
+/// blocks, which is a world concern the inventory does not share.
+const TINT: [f32; 3] = [1.0, 1.0, 1.0];
+
+/// The atlas tile that stands for one item in a slot.
+fn item_art(item: ItemId) -> TileId {
+    texture::item_tile(item)
+}
 use crate::crafting;
 use crate::gfx;
 use crate::hud::{self, Slot};
@@ -205,7 +216,8 @@ pub fn draw_panel(
     gfx.hud
         .panel(ox - 16.0, oy - 4.8 * step, gw + 32.0, 8.2 * step + 40.0);
 
-    let to_slot = |s: Option<ItemStack>| s.map(|st| Slot::new(st.item.color(), st.count as u16));
+    let to_slot =
+        |s: Option<ItemStack>| s.map(|st| Slot::new(item_art(st.item), TINT, st.count as u16));
 
     // The 36 inventory slots are common to every panel.
     for i in 0..36 {

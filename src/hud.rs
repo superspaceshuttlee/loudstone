@@ -51,7 +51,12 @@ pub const TEXT_SIZE: f32 = 14.0;
 /// `color` is normally `BlockId::color()` of the held block.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Slot {
-    /// Tint of the item swatch drawn inside the slot.
+    /// Which atlas tile to draw. For a block item this is an isometric cube
+    /// built from that block's own faces; for anything else it is the item's
+    /// own icon.
+    pub tile: crate::texture::TileId,
+    /// Tint multiplied over the art. Left white for most things; biome-tinted
+    /// grass uses it the same way the world does.
     pub color: [f32; 3],
     /// Stack count. Drawn in the corner when greater than one.
     pub count: u16,
@@ -59,8 +64,8 @@ pub struct Slot {
 
 impl Slot {
     /// Convenience constructor.
-    pub fn new(color: [f32; 3], count: u16) -> Self {
-        Self { color, count }
+    pub fn new(tile: crate::texture::TileId, color: [f32; 3], count: u16) -> Self {
+        Self { tile, color, count }
     }
 }
 
@@ -317,6 +322,9 @@ struct HudVertex {
     pos: [f32; 2],
     uv: [f32; 2],
     color: [f32; 4],
+    /// 0 samples the font mask, 1 samples the block atlas. Per-vertex rather
+    /// than a second pipeline so the overlay is still one draw call.
+    mode: f32,
 }
 
 #[repr(C)]
@@ -349,6 +357,45 @@ impl Batch {
     }
 
     fn quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], color: [f32; 4]) {
+        self.quad_mode(x, y, w, h, uv, color, 0.0);
+    }
+
+    /// A quad sampling the block atlas rather than the font mask.
+    fn tile_quad(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tile: crate::texture::TileId,
+        tint: [f32; 4],
+    ) {
+        let r = crate::texture::tile_uv_rect(tile);
+        // Half-texel inset. Nearest sampling at a tile's exact edge can land on
+        // the neighbouring tile, which shows up as a stray line of some other
+        // block down one side of an icon.
+        let e = 0.5 / crate::texture::ATLAS_W as f32;
+        self.quad_mode(
+            x,
+            y,
+            w,
+            h,
+            [r[0] + e, r[1] + e, r[2] - e, r[3] - e],
+            tint,
+            1.0,
+        );
+    }
+
+    fn quad_mode(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        uv: [f32; 4],
+        color: [f32; 4],
+        mode: f32,
+    ) {
         if w <= 0.0 || h <= 0.0 || color[3] <= 0.0 {
             return;
         }
@@ -358,21 +405,25 @@ impl Batch {
             pos: [x0, y0],
             uv: [u0, v0],
             color,
+            mode,
         };
         let tr = HudVertex {
             pos: [x1, y0],
             uv: [u1, v0],
             color,
+            mode,
         };
         let br = HudVertex {
             pos: [x1, y1],
             uv: [u1, v1],
             color,
+            mode,
         };
         let bl = HudVertex {
             pos: [x0, y1],
             uv: [u0, v1],
             color,
+            mode,
         };
         self.verts.extend_from_slice(&[tl, tr, br, tl, br, bl]);
     }
@@ -465,16 +516,17 @@ impl Batch {
             let inset = (size * 0.13).max(3.0);
             let sw = size - inset * 2.0;
             let c = item.color;
-            self.rect(x + inset, y + inset, sw, sw, [c[0], c[1], c[2], 1.0]);
-            // A darker band along the bottom reads as depth without a texture.
-            let band = (sw * 0.28).max(2.0);
-            self.rect(
+            self.tile_quad(
                 x + inset,
-                y + inset + sw - band,
+                y + inset,
                 sw,
-                band,
-                [c[0] * 0.62, c[1] * 0.62, c[2] * 0.62, 1.0],
+                sw,
+                item.tile,
+                [c[0], c[1], c[2], 1.0],
             );
+            // No painted band under the art: the icon is a lit cube and brings
+            // its own depth. The band existed only because a slot used to be a
+            // flat coloured square with nothing to read as a shape.
 
             if item.count > 1 {
                 let ts = (size * 0.26).max(9.0);
@@ -604,6 +656,8 @@ pub struct Hud {
     screen_buf: wgpu::Buffer,
     font_tex: wgpu::Texture,
     font_uploaded: bool,
+    /// The block atlas, for item art. Uploaded with the font on the first frame.
+    item_tex: wgpu::Texture,
     vbuf: wgpu::Buffer,
     vbuf_cap: usize,
     batch: Batch,
@@ -694,8 +748,47 @@ impl Hud {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
+
+        // The block atlas, so the overlay can draw item art. Only the top mip
+        // is uploaded: a HUD icon is drawn at a fixed size and never minified,
+        // so the rest of the chain would be dead weight.
+        let (aw, ah) = (
+            crate::texture::ATLAS_W as u32,
+            crate::texture::ATLAS_H as u32,
+        );
+        let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hud item atlas"),
+            size: wgpu::Extent3d {
+                width: aw,
+                height: ah,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("hud bind group"),
@@ -711,6 +804,14 @@ impl Hud {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
@@ -737,6 +838,11 @@ impl Hud {
                 format: wgpu::VertexFormat::Float32x4,
                 offset: 16,
                 shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32,
+                offset: 32,
+                shader_location: 3,
             },
         ];
 
@@ -797,6 +903,7 @@ impl Hud {
             screen_buf,
             font_tex,
             font_uploaded: false,
+            item_tex: atlas_tex,
             vbuf,
             vbuf_cap: INITIAL_VERTS,
             batch: Batch::new(),
@@ -912,10 +1019,32 @@ impl Hud {
         queue: &wgpu::Queue,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
-        // The atlas never changes, so it is uploaded once, on the first frame.
-        // Doing it here rather than in `new` keeps the constructor free of a
-        // queue argument.
+        // Neither atlas ever changes, so both are uploaded once, on the first
+        // frame. Doing it here rather than in `new` keeps the constructor free
+        // of a queue argument.
         if !self.font_uploaded {
+            let items = crate::texture::atlas();
+            let (iw, ih, ref ipx) = items.levels[0];
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.item_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                ipx,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(iw * 4),
+                    rows_per_image: Some(ih),
+                },
+                wgpu::Extent3d {
+                    width: iw,
+                    height: ih,
+                    depth_or_array_layers: 1,
+                },
+            );
+
             let pixels = build_atlas();
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -1163,7 +1292,7 @@ mod tests {
         let (w, h) = (1280.0, 720.0);
         let mut b = batch(w, h);
         let slots: Vec<Option<Slot>> = (0..HOTBAR_SLOTS)
-            .map(|i| Some(Slot::new([0.5, 0.4, 0.3], (i as u16) * 7)))
+            .map(|i| Some(Slot::new(1, [0.5, 0.4, 0.3], (i as u16) * 7)))
             .collect();
         b.hotbar(&slots, 3);
 
@@ -1213,9 +1342,9 @@ mod tests {
     #[test]
     fn stack_counts_are_drawn_only_above_one() {
         let mut none = batch(800.0, 600.0);
-        none.slot(0.0, 0.0, SLOT_SIZE, Some(Slot::new([1.0; 3], 1)), false);
+        none.slot(0.0, 0.0, SLOT_SIZE, Some(Slot::new(1, [1.0; 3], 1)), false);
         let mut some = batch(800.0, 600.0);
-        some.slot(0.0, 0.0, SLOT_SIZE, Some(Slot::new([1.0; 3], 64)), false);
+        some.slot(0.0, 0.0, SLOT_SIZE, Some(Slot::new(1, [1.0; 3], 64)), false);
         // "64" is two glyphs, drawn twice (shadow + face).
         assert_eq!(some.verts.len(), none.verts.len() + 4 * VERTS_PER_QUAD);
     }
@@ -1259,12 +1388,15 @@ mod tests {
     #[test]
     fn slot_grid_covers_every_cell() {
         let mut b = batch(1280.0, 720.0);
-        let items: Vec<Option<Slot>> = vec![Some(Slot::new([0.2, 0.6, 0.2], 1)); 9];
+        let items: Vec<Option<Slot>> = vec![Some(Slot::new(1, [0.2, 0.6, 0.2], 1)); 9];
         // 27 cells but only 9 items: the rest must still draw as empty slots.
         b.slot_grid([100.0, 100.0], 9, 3, 40.0, 4.0, &items);
 
         let empty_cell = VERTS_PER_QUAD + 4 * VERTS_PER_QUAD; // background + 4-sided border
-        let filled_cell = empty_cell + 2 * VERTS_PER_QUAD; // swatch + shade band
+        // One quad of item art. It used to be two -- a flat colour swatch and a
+        // painted band under it faking depth -- back when the overlay could not
+        // sample a texture and a slot was a coloured square.
+        let filled_cell = empty_cell + VERTS_PER_QUAD;
         assert_eq!(b.verts.len(), 9 * filled_cell + 18 * empty_cell);
 
         assert!((grid_width(9, 40.0, 4.0) - (9.0 * 40.0 + 8.0 * 4.0)).abs() < 1e-4);
@@ -1299,9 +1431,23 @@ mod tests {
         assert!(b.verts.iter().all(|v| v.pos[0] < 400.0 && v.pos[1] < 120.0));
     }
 
+    /// The vertex must have no padding, and the attribute offsets declared to
+    /// wgpu must match the field offsets Rust actually chose. Getting the second
+    /// one wrong does not fail to compile -- it draws garbage.
     #[test]
     fn vertex_layout_is_tightly_packed() {
-        assert_eq!(VERTEX_SIZE, 32);
+        assert_eq!(VERTEX_SIZE, 2 * 4 + 2 * 4 + 4 * 4 + 4);
         assert_eq!(std::mem::size_of::<ScreenUniform>(), 16);
+        let v = HudVertex {
+            pos: [0.0; 2],
+            uv: [0.0; 2],
+            color: [0.0; 4],
+            mode: 0.0,
+        };
+        let base = &v as *const _ as usize;
+        assert_eq!(&v.pos as *const _ as usize - base, 0);
+        assert_eq!(&v.uv as *const _ as usize - base, 8);
+        assert_eq!(&v.color as *const _ as usize - base, 16);
+        assert_eq!(&v.mode as *const _ as usize - base, 32);
     }
 }

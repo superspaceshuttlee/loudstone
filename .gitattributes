@@ -1,0 +1,19 @@
+# Line endings are normalised to LF in the repository and in the working tree.
+#
+# This is not housekeeping. `registry.rs` embeds the data files with
+# `include_str!`, and two of its tests inject a fault by replacing a substring
+# that spans a line break. When Git handed the working tree CRLF, those
+# substrings stopped matching, the injection silently did nothing, and the tests
+# went on asserting that *valid* data was rejected -- passing data through and
+# failing for a reason unrelated to what they check.
+*               text=auto eol=lf
+
+*.rs            text eol=lf
+*.ron           text eol=lf
+*.wgsl          text eol=lf
+*.toml          text eol=lf
+*.md            text eol=lf
+
+*.png           binary
+*.ico           binary
+*.lsw           binary

@@ -104,5 +104,13 @@
             tool: Some((Sword, "stone")),   attack: 6.0),
         (id: 132, name: "iron_sword",     display: "Iron Sword",
             tool: Some((Sword, "iron")),    attack: 8.0),
+
+        // A bucket is the only item that carries a block around without being
+        // that block's item, so it does not use `places` -- filling and emptying
+        // are handled where right-click is.
+        (id: 140, name: "bucket",         display: "Bucket",
+            max_stack: Some(16), color: Some([0.72, 0.74, 0.78])),
+        (id: 141, name: "water_bucket",   display: "Water Bucket",
+            max_stack: Some(1),  color: Some([0.30, 0.55, 0.85])),
     ],
 )

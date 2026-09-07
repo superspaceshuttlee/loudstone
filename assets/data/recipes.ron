@@ -98,6 +98,16 @@
             key: { 'M': "iron_ingot", 'S': "stick" },
         ),
 
+        // A bucket: a shell of iron with an open top.
+        (
+            output: "bucket", count: 1,
+            pattern: [
+                "I I",
+                " I ",
+            ],
+            key: { 'I': "iron_ingot" },
+        ),
+
         // --- axes: an L of material on a stick shaft -------------------------
         (
             output: "wooden_axe", count: 1,

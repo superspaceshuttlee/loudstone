@@ -595,6 +595,13 @@ impl App {
     fn interact(&mut self, dt: f32) {
         self.hands.tick(dt);
 
+        // Let water find its level. Budgeted per frame so that flooding a long
+        // tunnel is a wave you can watch rather than a hitch, and recorded in
+        // the edit log so the sea does not drain again on the next load.
+        for (x, y, z) in self.world.flow_water(WATER_FLOW_PER_FRAME) {
+            self.data.edits.note_set_block(x, y, z, BlockId::WATER);
+        }
+
         let eye = self.camera.pos;
         let hit = self
             .world
@@ -663,6 +670,7 @@ impl App {
                             self.data.edits.note_set_block(bx, by, bz, BlockId::AIR);
                             self.grant_drop(tool, broken);
                             self.break_furnace_at((bx, by, bz));
+                            self.world.disturb_water(bx, by, bz);
                         }
                     }
                 } else if self.hands.chip_timer <= 0.0 {
@@ -703,6 +711,7 @@ impl App {
                     if self.world.block_at(t.0, t.1, t.2).is_air() && !before.is_air() {
                         self.grant_drop(tool, before);
                         self.break_furnace_at(t);
+                        self.world.disturb_water(t.0, t.1, t.2);
                         self.stats.mined_kinds.push(before.0);
                         self.hands.target = None;
                         self.audio.play(
@@ -733,6 +742,15 @@ impl App {
             let Some(stack) = self.data.inventory.selected_stack() else {
                 return;
             };
+            // A bucket is the one item that moves a block without being that
+            // block's item, so it is handled before the ordinary place path.
+            if matches!(stack.item, ItemId::BUCKET | ItemId::WATER_BUCKET)
+                && self.use_bucket(stack.item, &hit, eye)
+            {
+                self.hands.place_timer = PLACE_INTERVAL;
+                return;
+            }
+
             let Some(id) = stack.item.places() else {
                 return;
             };
@@ -754,6 +772,58 @@ impl App {
                 self.hands.place_timer = PLACE_INTERVAL;
             }
         }
+    }
+
+    /// Fill an empty bucket from water, or pour a full one out.
+    ///
+    /// Filling takes the whole block, which the sea then flows back into a
+    /// moment later -- so scooping from an ocean looks like scooping from an
+    /// ocean, and scooping the last block of a puddle actually empties it.
+    /// Returns whether the bucket did anything.
+    fn use_bucket(&mut self, item: ItemId, hit: &world::RayHit, eye: Vec3) -> bool {
+        let sel = self.data.inventory.selected();
+        let (bx, by, bz) = hit.block;
+        let at = Vec3::new(bx as f32 + 0.5, by as f32 + 0.5, bz as f32 + 0.5);
+
+        if item == ItemId::BUCKET {
+            if self.world.block_at(bx, by, bz) != BlockId::WATER {
+                return false;
+            }
+            self.world.set_block(bx, by, bz, BlockId::AIR);
+            self.data.edits.note_set_block(bx, by, bz, BlockId::AIR);
+            self.world.disturb_water(bx, by, bz);
+            self.data.inventory.take_from_slot(sel, 1);
+            self.data.inventory.add_item(ItemId::WATER_BUCKET, 1);
+            self.audio.play(
+                audio::Sound::Place(BlockId::WATER),
+                audio::PlayOpts::at(at, eye),
+            );
+            return true;
+        }
+
+        // Pouring: into the face we are looking at, unless that block is itself
+        // replaceable, in which case fill it directly.
+        let (px, py, pz) = if self.world.block_at(bx, by, bz).is_replaceable() {
+            (bx, by, bz)
+        } else {
+            hit.adjacent()
+        };
+        if !self.world.block_at(px, py, pz).is_replaceable() {
+            return false;
+        }
+        self.world.set_block(px, py, pz, BlockId::WATER);
+        self.data.edits.note_set_block(px, py, pz, BlockId::WATER);
+        self.world.disturb_water(px, py, pz);
+        self.data.inventory.take_from_slot(sel, 1);
+        self.data.inventory.add_item(ItemId::BUCKET, 1);
+        self.audio.play(
+            audio::Sound::Place(BlockId::WATER),
+            audio::PlayOpts::at(
+                Vec3::new(px as f32 + 0.5, py as f32 + 0.5, pz as f32 + 0.5),
+                eye,
+            ),
+        );
+        true
     }
 
     /// Leave whatever panel is open, returning everything on the cursor and in
@@ -1533,7 +1603,7 @@ impl App {
             .inventory
             .hotbar()
             .iter()
-            .map(|s| s.map(|st| Slot::new(st.item.color(), st.count as u16)))
+            .map(|s| s.map(|st| Slot::new(texture::item_tile(st.item), [1.0; 3], st.count as u16)))
             .collect();
         if self.ui == Ui::Playing && self.cli.model_demo.is_none() {
             gfx.hud.hotbar(&slots, self.data.inventory.selected());

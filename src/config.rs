@@ -223,6 +223,13 @@ pub const NIGHT_SKY_SUBTRACT: u8 = 11;
 /// to be rebuilt -- but slowly, in the background, off the frame's critical path.
 pub const RELIGHT_CHUNKS_PER_FRAME: usize = 16;
 
+/// Blocks water may flow into per frame.
+///
+/// Water spreading is a flood fill, and an unbudgeted one would fill a
+/// kilometre of dug tunnel inside a single frame -- correct, and a visible
+/// stall. At this rate a flooding tunnel is a wave you can walk beside.
+pub const WATER_FLOW_PER_FRAME: usize = 96;
+
 // --- combat ---
 /// Seconds between swings.
 pub const ATTACK_INTERVAL: f32 = 0.40;

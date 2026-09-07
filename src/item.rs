@@ -133,6 +133,8 @@ impl ItemId {
     pub const WOODEN_AXE: ItemId = ItemId(120);
     pub const STONE_AXE: ItemId = ItemId(121);
     pub const IRON_AXE: ItemId = ItemId(122);
+    pub const BUCKET: ItemId = ItemId(140);
+    pub const WATER_BUCKET: ItemId = ItemId(141);
     pub const WOODEN_SWORD: ItemId = ItemId(130);
     pub const STONE_SWORD: ItemId = ItemId(131);
     pub const IRON_SWORD: ItemId = ItemId(132);

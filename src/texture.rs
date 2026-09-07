@@ -136,12 +136,30 @@ pub const T_PIG_HEAD: TileId = 78;
 pub const T_PIG_BODY: TileId = 79;
 pub const T_ARROW: TileId = 80;
 pub const T_MISSING: TileId = 81;
+pub const T_BUCKET: TileId = 82;
+pub const T_WATER_BUCKET: TileId = 83;
+
+/// First of the block-icon tiles. There is one per block id, at
+/// `ICON_BASE + block.0`, and each holds an isometric cube built from that
+/// block's own faces.
+///
+/// A block item used to show one flat face in the inventory, so a slot of stone
+/// and a slot of cobblestone were two grey squares and every wood looked alike.
+/// Nothing about a flat square says "this is a block you can place". The cube
+/// shows the top and two sides at once, which is both what Minecraft does and
+/// the reason its inventory is readable at a glance.
+pub const ICON_BASE: TileId = 84;
+/// One icon slot per possible block id, so the lookup is `ICON_BASE + id` with
+/// no table to keep in step.
+pub const ICON_SLOTS: usize = 40;
 
 /// Number of tiles the atlas actually paints.
-pub const TILE_COUNT: usize = 82;
+pub const TILE_COUNT: usize = ICON_BASE as usize + ICON_SLOTS;
 
 /// Human-readable name per tile, for test failures and the atlas dump.
-pub const TILE_NAMES: [&str; TILE_COUNT] = [
+/// Names for the tiles that are painted individually. Icon tiles are composited
+/// afterwards from these and are named by their block id instead.
+pub const TILE_NAMES: [&str; ICON_BASE as usize] = [
     "white",
     "stone",
     "dirt",
@@ -224,6 +242,8 @@ pub const TILE_NAMES: [&str; TILE_COUNT] = [
     "pig_body",
     "arrow",
     "missing",
+    "bucket",
+    "water_bucket",
 ];
 
 // ---------------------------------------------------------------------------
@@ -339,19 +359,19 @@ fn log(side: bool, bark: TileId, end: TileId) -> TileId {
 /// The tile an inventory icon uses for one item.
 pub fn item_tile(item: ItemId) -> TileId {
     if let Some(block) = item.places() {
-        // Side faces read best as an icon: a grass block shows its fringe, a
-        // log shows its bark, a furnace shows its mouth.
-        return match block {
-            BlockId::FURNACE => T_FURNACE_FRONT,
-            BlockId::CRAFTING_TABLE => T_TABLE_FRONT,
-            _ => block_tile(block, 2),
-        };
+        // A cube built from this block's own faces, not one flat face of it.
+        if (block.0 as usize) < ICON_SLOTS {
+            return ICON_BASE + block.0 as TileId;
+        }
+        return block_tile(block, 2);
     }
     match item {
         ItemId::STICK => T_STICK,
         ItemId::COAL => T_COAL,
         ItemId::RAW_IRON => T_RAW_IRON,
         ItemId::IRON_INGOT => T_IRON_INGOT,
+        ItemId::BUCKET => T_BUCKET,
+        ItemId::WATER_BUCKET => T_WATER_BUCKET,
         _ => match item.tool() {
             Some((ToolKind::Pickaxe, tier)) => {
                 tier_tile(tier, T_PICK_WOOD, T_PICK_STONE, T_PICK_IRON)
@@ -850,7 +870,11 @@ fn paint_skins_into(px: &mut [u8]) {
 
 fn build_atlas() -> Atlas {
     let mut px = vec![0u8; ATLAS_W * ATLAS_H * 4];
-    for t in 0..TILE_COUNT {
+    // Only the individually painted tiles. Icon tiles are composited from these
+    // afterwards, and running `paint_tile` over them first would fill them with
+    // the missing-texture pattern, which then shows through everywhere the cube
+    // silhouette does not cover.
+    for t in 0..ICON_BASE as usize {
         let mut tex = Tex::new();
         paint_tile(t as TileId, &mut tex);
         let (ox, oy) = tile_origin(t as TileId);
@@ -863,6 +887,7 @@ fn build_atlas() -> Atlas {
         }
     }
 
+    paint_block_icons_into(&mut px);
     paint_skins_into(&mut px);
 
     let mut levels = vec![(ATLAS_W as u32, ATLAS_H as u32, px)];
@@ -871,6 +896,98 @@ fn build_atlas() -> Atlas {
         levels.push(downsample(w as usize, h as usize, src));
     }
     Atlas { levels }
+}
+
+/// Composite one isometric cube icon per block, from that block's own faces.
+///
+/// This runs after the ordinary tiles are painted because it *reads* them: the
+/// icon for stone is the stone texture seen on three faces, so there is exactly
+/// one definition of what stone looks like and an icon can never drift away from
+/// the block it stands for.
+///
+/// The projection is the standard 2:1 pixel-art isometric, which is what makes
+/// it land on whole pixels instead of a stair-stepped mush: the top face is a
+/// rhombus 16 wide and 8 tall, and the two side faces hang below it. Each face
+/// is a parallelogram, so mapping a screen pixel back to a texture coordinate is
+/// a 2x2 solve rather than anything iterative.
+fn paint_block_icons_into(px: &mut [u8]) {
+    // Corners, in tile pixels. The cube fills the 16x16 tile.
+    const TOP_L: [f32; 2] = [0.0, 4.0];
+    const TOP_T: [f32; 2] = [8.0, 0.0];
+    const TOP_R: [f32; 2] = [16.0, 4.0];
+    const MID: [f32; 2] = [8.0, 8.0];
+    // Shades matching the world's own face shading, so an icon and the block it
+    // places are lit the same way.
+    const TOP_SHADE: f32 = 1.0;
+    const LEFT_SHADE: f32 = 0.80;
+    const RIGHT_SHADE: f32 = 0.62;
+
+    for id in 0..ICON_SLOTS {
+        let block = BlockId(id as u8);
+        if block.is_air() {
+            continue;
+        }
+        let tile = ICON_BASE + id as TileId;
+        let (ox, oy) = tile_origin(tile);
+        // Faces: 0 is +Y (top), 2 is a side.
+        let top_tile = block_tile(block, 0);
+        let side_tile = match block {
+            BlockId::FURNACE => T_FURNACE_FRONT,
+            BlockId::CRAFTING_TABLE => T_TABLE_FRONT,
+            _ => block_tile(block, 2),
+        };
+
+        for y in 0..TILE {
+            for x in 0..TILE {
+                let p = [x as f32 + 0.5, y as f32 + 0.5];
+                // Try each face in turn; the first that contains the point wins.
+                let hit = face_uv(p, TOP_L, sub(TOP_T, TOP_L), sub(TOP_R, TOP_L))
+                    .map(|uv| (top_tile, uv, TOP_SHADE))
+                    .or_else(|| {
+                        face_uv(p, TOP_L, sub(MID, TOP_L), [0.0, 8.0])
+                            .map(|uv| (side_tile, uv, LEFT_SHADE))
+                    })
+                    .or_else(|| {
+                        face_uv(p, MID, sub(TOP_R, MID), [0.0, 8.0])
+                            .map(|uv| (side_tile, uv, RIGHT_SHADE))
+                    });
+                let Some((src, [u, v], k)) = hit else {
+                    continue;
+                };
+                let sx = ((u * TILE as f32) as usize).min(TILE - 1);
+                let sy = ((v * TILE as f32) as usize).min(TILE - 1);
+                let (sox, soy) = tile_origin(src);
+                let i = ((soy + sy) * ATLAS_W + sox + sx) * 4;
+                let c = [px[i], px[i + 1], px[i + 2], px[i + 3]];
+                if c[3] < 128 {
+                    continue; // a cut-out face leaves the icon see-through too
+                }
+                let lit = shade(c, k);
+                let o = ((oy + y) * ATLAS_W + ox + x) * 4;
+                px[o..o + 4].copy_from_slice(&[lit[0], lit[1], lit[2], 255]);
+            }
+        }
+    }
+}
+
+fn sub(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+/// Where `p` falls on the parallelogram at `origin` spanned by `e1` and `e2`,
+/// or `None` if it falls outside. Returns coordinates in 0..1 along each edge.
+fn face_uv(p: [f32; 2], origin: [f32; 2], e1: [f32; 2], e2: [f32; 2]) -> Option<[f32; 2]> {
+    let d = [p[0] - origin[0], p[1] - origin[1]];
+    let det = e1[0] * e2[1] - e1[1] * e2[0];
+    if det.abs() < 1.0e-6 {
+        return None;
+    }
+    let u = (d[0] * e2[1] - d[1] * e2[0]) / det;
+    let v = (e1[0] * d[1] - e1[1] * d[0]) / det;
+    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+        return None;
+    }
+    Some([u, v])
 }
 
 /// Halve an RGBA image with a 2x2 box filter, averaging in linear light and
@@ -1259,6 +1376,8 @@ fn paint_tile(id: TileId, t: &mut Tex) {
         T_GOLD_ORE => ore(t, rgb(248, 214, 78), rgb(198, 158, 44), 0x6603, false),
         T_DIAMOND_ORE => ore(t, rgb(110, 226, 226), rgb(66, 176, 186), 0x6604, true),
         T_WATER => water(t),
+        T_BUCKET => bucket(t, false),
+        T_WATER_BUCKET => bucket(t, true),
         T_CACTUS_SIDE => cactus_side(t),
         T_CACTUS_TOP => cactus_top(t),
         T_CACTUS_BOTTOM => cactus_bottom(t),
@@ -1818,6 +1937,63 @@ fn water(t: &mut Tex) {
             y,
             [shade(c, 1.3)[0], shade(c, 1.3)[1], shade(c, 1.3)[2], c[3]],
         );
+    }
+}
+
+/// A pail: a tapered iron body with a rim and a handle.
+fn bucket(t: &mut Tex, full: bool) {
+    let body = rgb(148, 152, 160);
+    for y in 4..15 {
+        // Tapered, so it reads as a pail rather than a tin can.
+        let inset = ((y - 4) / 5) as usize;
+        for x in (3 + inset)..(13 - inset) {
+            let f = 1.0 - (x as f32 - 3.0) / 12.0 * 0.35;
+            t.set(x, y, shade(body, 0.82 + f * 0.4));
+        }
+    }
+    // Rim.
+    for x in 2..14 {
+        t.set(x, 3, shade(body, 1.25));
+        t.set(x, 4, shade(body, 1.1));
+    }
+    // Handle, an arc over the rim.
+    for (x, y) in [(3, 2), (4, 1), (6, 0), (9, 0), (11, 1), (12, 2)] {
+        t.set(x, y, shade(body, 0.7));
+    }
+    if full {
+        // Water sits inside the rim, below it, so the pail still reads as a pail.
+        for y in 5..13 {
+            let inset = ((y - 4) / 5) as usize;
+            for x in (4 + inset)..(12 - inset) {
+                let n = fbm(x as f32, y as f32, 0x7301);
+                t.set(x, y, mix(rgb(38, 92, 176), rgb(66, 126, 206), n));
+            }
+        }
+        for x in 4..12 {
+            t.set(x, 5, rgb(96, 158, 224));
+        }
+    }
+    // A dark outline so it separates from the slot behind it.
+    for y in 0..TILE {
+        for x in 0..TILE {
+            if t.get(x, y)[3] == 0 {
+                continue;
+            }
+            let edge = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)]
+                .iter()
+                .any(|(dx, dy)| {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    nx < 0
+                        || ny < 0
+                        || nx >= TILE as i32
+                        || ny >= TILE as i32
+                        || t.get(nx as usize, ny as usize)[3] == 0
+                });
+            if edge {
+                let c = t.get(x, y);
+                t.set(x, y, shade(c, 0.55));
+            }
+        }
     }
 }
 
@@ -2469,7 +2645,11 @@ mod tests {
             TILE_COUNT <= ATLAS_COLS * ATLAS_ROWS,
             "{TILE_COUNT} tiles do not fit a {ATLAS_COLS}x{ATLAS_ROWS} atlas"
         );
-        assert_eq!(TILE_NAMES.len(), TILE_COUNT);
+        assert_eq!(
+            TILE_NAMES.len(),
+            ICON_BASE as usize,
+            "TILE_NAMES covers the individually painted tiles; icons are named              by block id and composited afterwards"
+        );
     }
 
     /// Every registered tile must actually be painted. A tile left blank shows
@@ -2478,7 +2658,7 @@ mod tests {
     #[test]
     fn every_tile_has_content() {
         let a = atlas();
-        for t in 0..TILE_COUNT {
+        for t in 0..ICON_BASE as usize {
             let name = TILE_NAMES[t];
             let first = a.tile_texel(t as TileId, 0, 0);
             let mut distinct = false;
@@ -2505,23 +2685,22 @@ mod tests {
     /// address space would break this.
     #[test]
     fn generation_is_deterministic() {
-        let mut a = vec![0u8; ATLAS_W * ATLAS_H * 4];
-        for t in 0..TILE_COUNT {
-            let mut tex = Tex::new();
-            paint_tile(t as TileId, &mut tex);
-            let (ox, oy) = tile_origin(t as TileId);
-            for y in 0..TILE {
-                for x in 0..TILE {
-                    let i = ((oy + y) * ATLAS_W + ox + x) * 4;
-                    a[i..i + 4].copy_from_slice(&tex.get(x, y));
-                }
-            }
+        // Rebuild through the real entry point rather than re-implementing it
+        // here. The previous version painted tiles by hand and then compared
+        // against the cached atlas, so it silently stopped covering every stage
+        // the moment the builder grew one -- which is exactly what happened when
+        // block icons were added.
+        let a = build_atlas();
+        let b = build_atlas();
+        assert_eq!(a.levels.len(), b.levels.len());
+        for (i, ((w, h, x), (_, _, y))) in a.levels.iter().zip(b.levels.iter()).enumerate() {
+            assert_eq!(x, y, "atlas mip {i} ({w}x{h}) is not reproducible");
         }
-        // The atlas is tiles *and* the mob skin sheets, so a faithful rebuild
-        // has to paint both. Comparing tiles alone would only prove that the
-        // skins exist, not that anything is reproducible.
-        paint_skins_into(&mut a);
-        assert_eq!(a, atlas().levels[0].2, "atlas generation is not stable");
+        assert_eq!(
+            a.levels[0].2,
+            atlas().levels[0].2,
+            "the cached atlas differs from a fresh build"
+        );
     }
 
     #[test]

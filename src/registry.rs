@@ -1508,6 +1508,22 @@ mod tests {
         );
     }
 
+    /// Replace one substring of the embedded data, failing loudly if it is not
+    /// there.
+    ///
+    /// An injection that silently matches nothing hands the registry *valid*
+    /// data and then asserts an error, so the test fails for a reason unrelated
+    /// to what it claims to check -- or, worse, keeps passing while checking
+    /// nothing. Both of the tests below were doing that after Git rewrote the
+    /// data files to CRLF and these needles stopped spanning a line break.
+    fn inject(from: &str, to: &str) -> String {
+        assert!(
+            EMBEDDED_RECIPES.contains(from),
+            "nothing matched {from:?}: this test is not testing what it says"
+        );
+        EMBEDDED_RECIPES.replacen(from, to, 1)
+    }
+
     #[test]
     fn a_pattern_character_with_no_key_is_rejected() {
         let recipes = EMBEDDED_RECIPES.replacen(

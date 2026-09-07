@@ -139,6 +139,15 @@ pub struct World {
     /// TEMPORARY: see `debug_light_scene`.
     debug_scene_built: bool,
 
+    /// Air positions that may now need water flowing into them.
+    ///
+    /// Water is a block, not a simulation, and until this existed nothing ever
+    /// asked whether a hole was next to the sea. Breaking a block underwater
+    /// left a permanent air pocket in the ocean, because the only code that had
+    /// ever placed water was terrain generation.
+    water_queue: VecDeque<(i32, i32, i32)>,
+    water_queued: HashSet<(i32, i32, i32)>,
+
     noise: Vec<NoiseEvent>,
     pub stats: WorldStats,
 }
@@ -168,6 +177,8 @@ impl World {
             daylight: 1.0,
             sky_subtract: 0,
             relight_queue: VecDeque::new(),
+            water_queue: VecDeque::new(),
+            water_queued: HashSet::new(),
             light_dirty: HashSet::new(),
             debug_scene_built: false,
             noise: Vec::new(),
@@ -207,6 +218,81 @@ impl World {
                 self.relight_block(x, y, z);
             }
         }
+    }
+
+    /// Tell the water that this position changed, so anywhere adjacent gets
+    /// another chance to fill.
+    ///
+    /// Call it after removing a block, after placing one, and after pouring a
+    /// bucket. Cheap: it only queues positions, and the queue is drained under a
+    /// budget.
+    pub fn disturb_water(&mut self, x: i32, y: i32, z: i32) {
+        for (dx, dy, dz) in [
+            (0, 0, 0),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            let p = (x + dx, y + dy, z + dz);
+            if self.water_queued.insert(p) {
+                self.water_queue.push_back(p);
+            }
+        }
+    }
+
+    /// Should water occupy this air block?
+    ///
+    /// Two rules, and between them they cover everything this world has:
+    ///
+    /// * water **falls** into any air directly under water, at any height, which
+    ///   is what makes a poured bucket run downhill;
+    /// * at or below the waterline, water spreads sideways into any air beside
+    ///   it, which is the sea finding its level and refilling anything dug out
+    ///   of it.
+    ///
+    /// What it deliberately does not do is spread sideways *above* the
+    /// waterline. Doing that properly needs a per-block flow level so the spread
+    /// can decay with distance and recede when its source is removed, and there
+    /// is nowhere to keep one: a block is a bare `u8` id. Without decay a single
+    /// poured bucket would flood a plateau outward forever.
+    fn water_wants_in(&self, x: i32, y: i32, z: i32) -> bool {
+        if !self.block_at(x, y, z).is_air() {
+            return false;
+        }
+        if self.block_at(x, y + 1, z) == BlockId::WATER {
+            return true;
+        }
+        if y > crate::worldgen::tuning::WATER_LEVEL {
+            return false;
+        }
+        [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .iter()
+            .any(|(dx, dz)| self.block_at(x + dx, y, z + dz) == BlockId::WATER)
+    }
+
+    /// Let water flow into at most `budget` queued positions.
+    ///
+    /// Returns what it filled, because the durable edit log lives on the save
+    /// side and the world has no business knowing about it. Without recording
+    /// these, a hole you filled by digging would be dry again on the next load.
+    pub fn flow_water(&mut self, budget: usize) -> Vec<(i32, i32, i32)> {
+        let mut filled = Vec::new();
+        for _ in 0..budget {
+            let Some((x, y, z)) = self.water_queue.pop_front() else {
+                break;
+            };
+            self.water_queued.remove(&(x, y, z));
+            if !self.water_wants_in(x, y, z) {
+                continue;
+            }
+            self.set_block(x, y, z, BlockId::WATER);
+            filled.push((x, y, z));
+            self.disturb_water(x, y, z);
+        }
+        filled
     }
 
     /// Carve one sub-voxel out of a block. Returns true if the block was destroyed.

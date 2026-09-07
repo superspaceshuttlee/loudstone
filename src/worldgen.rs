@@ -1677,6 +1677,14 @@ impl TerrainGen {
             return BlockId::BEDROCK;
         }
         if self.is_carved(x, y, z, col) {
+            // A carve under the open sea fills with water, not air. The seabed
+            // is not a roof: a cave mouth cut into it is a hole in the ocean,
+            // and leaving it dry put air bubbles under the water. A cave under
+            // *dry land* stays dry, which is why this asks about the column's
+            // surface and not just about the depth.
+            if y <= tuning::WATER_LEVEL && col.surface <= tuning::WATER_LEVEL {
+                return BlockId::WATER;
+            }
             return BlockId::AIR;
         }
         let depth = col.surface - y;
