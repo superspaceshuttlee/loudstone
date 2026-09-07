@@ -125,7 +125,11 @@ src/
   render/        everything that reaches the GPU
     gfx.rs       device, pipelines, atlas upload, entity geometry
     mesh.rs      chunk meshing: face culling, AO, sub-voxel geometry, UVs
-    texture.rs   the generated atlas: every block, item and mob tile
+    texture/
+      mod.rs     atlas geometry, tile ids, and the block-to-tile mapping
+      paint.rs   the 16x16 canvas, deterministic noise, shared palettes
+      recipes.rs one function per tile: what stone looks like, what a pick does
+      skins.rs   the 64x64 mob sheets, laid out the way Minecraft lays one out
     model.rs     the humanoid and quadruped rigs
     hud.rs       overlay: crosshair, hotbar, panels, and a hand-coded font
     screenshot.rs a dependency-free PNG writer
