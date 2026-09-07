@@ -13,8 +13,8 @@
 //! tools -- be tested directly, without a window or a world.
 
 use crate::Ui;
-use crate::item::ItemId;
-use crate::texture::{self, TileId};
+use crate::content::item::ItemId;
+use crate::render::texture::{self, TileId};
 
 /// Item art is drawn at full brightness; the tint exists for biome-coloured
 /// blocks, which is a world concern the inventory does not share.
@@ -24,10 +24,10 @@ const TINT: [f32; 3] = [1.0, 1.0, 1.0];
 fn item_art(item: ItemId) -> TileId {
     texture::item_tile(item)
 }
-use crate::crafting;
-use crate::gfx;
-use crate::hud::{self, Slot};
-use crate::inventory::{self, ItemStack};
+use crate::content::crafting;
+use crate::content::inventory::{self, ItemStack};
+use crate::render::gfx;
+use crate::render::hud::{self, Slot};
 
 // --- title screen -----------------------------------------------------------
 
@@ -400,7 +400,7 @@ pub fn return_panel_items(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item::ItemId;
+    use crate::content::item::ItemId;
 
     fn stack(item: ItemId, n: u8) -> Option<ItemStack> {
         Some(ItemStack::new(item, n))

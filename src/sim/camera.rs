@@ -349,8 +349,8 @@ impl CameraUniform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::BlockId;
-    use crate::chunk::{Chunk, ChunkPos};
+    use crate::content::block::BlockId;
+    use crate::world::chunk::{Chunk, ChunkPos};
     use std::sync::Arc;
 
     /// A world with an empty 3x3x2 chunk region so we can build test geometry

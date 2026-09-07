@@ -18,7 +18,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use glam::{IVec3, Vec3};
 
-use crate::block::BlockId;
+use crate::content::block::BlockId;
 
 // =============================================================================
 // ============================  TUNING BLOCK  =================================
@@ -562,7 +562,7 @@ impl SoundField {
 #[cfg(test)]
 pub mod mock {
     use super::VoxelWorld;
-    use crate::block::BlockId;
+    use crate::content::block::BlockId;
     use std::collections::HashMap;
 
     /// A small hand-built world with real sparse sub-voxel masks, matching the storage
@@ -683,7 +683,7 @@ pub mod mock {
 mod tests {
     use super::mock::MockWorld;
     use super::*;
-    use crate::block::BlockId;
+    use crate::content::block::BlockId;
 
     fn v(x: f32, y: f32, z: f32) -> Vec3 {
         Vec3::new(x, y, z)

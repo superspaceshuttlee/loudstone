@@ -37,13 +37,13 @@
 //! lighting work at all. The mesher agrees with it: light for a carved block's
 //! faces is sampled from its neighbours, never from the block itself.
 
-use crate::block::BlockId;
-use crate::chunk::Chunk;
 use crate::config::{
     CHUNK_SIZE, CHUNK_SIZE_I, LIGHT_AMBIENT, LIGHT_GAMMA, MAX_LIGHT, NIGHT_SKY_SUBTRACT,
     TORCH_LIGHT,
 };
-use crate::worldgen::TerrainGen;
+use crate::content::block::BlockId;
+use crate::world::chunk::Chunk;
+use crate::world::worldgen::TerrainGen;
 use std::collections::VecDeque;
 
 /// The six face directions, in the order the flood fill visits them.
@@ -510,8 +510,8 @@ pub fn update_for_block_change<V: LightVolume + ?Sized>(v: &mut V, x: i32, y: i3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{ChunkPos, local_index};
     use crate::config::WORLD_HEIGHT;
+    use crate::world::chunk::{ChunkPos, local_index};
     use std::collections::HashMap;
 
     /// A dense little test world: every cell is writable, nothing streams.

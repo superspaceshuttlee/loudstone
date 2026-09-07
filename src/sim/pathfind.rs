@@ -14,7 +14,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use glam::IVec3;
 
-use crate::sound::VoxelWorld;
+use crate::sim::sound::VoxelWorld;
 
 // =============================================================================
 // ============================  TUNING BLOCK  =================================
@@ -377,8 +377,8 @@ fn reconstruct(came: &HashMap<IVec3, (f32, IVec3)>, start: IVec3, end: IVec3) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::BlockId;
-    use crate::sound::mock::MockWorld;
+    use crate::content::block::BlockId;
+    use crate::sim::sound::mock::MockWorld;
 
     const GROUND: i32 = 64;
 

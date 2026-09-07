@@ -7,8 +7,8 @@
 //! bitmask, and they drop out of the map again the moment they are fully carved
 //! (block becomes air) or fully restored.
 
-use crate::block::BlockId;
 use crate::config::{CHUNK_SIZE, CHUNK_SIZE_I, CHUNK_VOL, SUBVOX};
+use crate::content::block::BlockId;
 use std::collections::HashMap;
 
 /// Chunk coordinate in chunk space (multiply by CHUNK_SIZE for world blocks).
@@ -120,7 +120,7 @@ pub struct Chunk {
     non_opaque: u32,
     /// True once terrain generation has filled this chunk.
     pub generated: bool,
-    /// True once [`crate::light::seed_chunk`] has given this chunk its initial
+    /// True once [`crate::world::light::seed_chunk`] has given this chunk its initial
     /// light. A chunk that reaches the world map unlit would render black.
     pub lit: bool,
 }

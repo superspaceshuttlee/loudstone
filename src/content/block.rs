@@ -23,11 +23,14 @@
 //! compile-time constant. They are a frozen index into the registry, and
 //! `registry_ids_match_the_constants` fails the build if the data ever
 //! disagrees with them.
+//!
+//! The registry itself is a sibling, [`crate::content::registry`]. It used to be
+//! declared here with a `#[path]` attribute so it appeared as `block::registry`,
+//! which meant the file was reachable by two names -- and the moment anything
+//! declared it under its real one as well, it was compiled *twice*, as two
+//! modules with two separate global caches.
 
-// The registry lives under `block` because block, item, and crafting rules all
-// share it. The renderer owns the separate top-level `texture` module.
-#[path = "registry.rs"]
-pub mod registry;
+use crate::content::registry;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 #[repr(transparent)]
@@ -340,12 +343,12 @@ mod tests {
         for n in 0..=BlockId::MAX {
             let id = BlockId(n);
             assert_eq!(
-                crate::light::emission(id),
+                crate::world::light::emission(id),
                 id.light_emission(),
                 "block {n} emits a different amount of light in light.rs than in blocks.ron"
             );
             assert_eq!(
-                crate::light::opacity(id),
+                crate::world::light::opacity(id),
                 id.light_opacity(),
                 "block {n} eats a different amount of light in light.rs than in blocks.ron"
             );

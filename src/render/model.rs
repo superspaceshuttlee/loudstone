@@ -14,8 +14,8 @@
 //! template maps correctly with no bespoke bookkeeping, and anyone who has made
 //! a Minecraft skin already knows how to make one for this.
 
-use crate::mesh::Vertex;
-use crate::texture;
+use crate::render::mesh::Vertex;
+use crate::render::texture;
 use glam::{Mat3, Vec3};
 
 /// One box of a model, positioned and sized in texels relative to the model's

@@ -27,11 +27,11 @@
 //! it. A trunk in one chunk and its leaves in the next therefore agree without
 //! the two chunks ever communicating, in either generation order.
 
-use crate::block::BlockId;
-use crate::chunk::{Chunk, ChunkPos, local_index};
 use crate::config::{
     CHUNK_SIZE, CHUNK_SIZE_I, CHUNK_VOL, SURFACE_PROBE_MARGIN, SURFACE_PROBE_STRIDE, WORLD_HEIGHT,
 };
+use crate::content::block::BlockId;
+use crate::world::chunk::{Chunk, ChunkPos, local_index};
 use noise::{NoiseFn, Perlin};
 use std::cell::RefCell;
 
@@ -40,7 +40,7 @@ use std::cell::RefCell;
 //  Nothing below this module invents a magic constant of its own.
 // ===========================================================================
 pub mod tuning {
-    use crate::block::BlockId;
+    use crate::content::block::BlockId;
 
     // --- sea, base height, ceiling -----------------------------------------
 

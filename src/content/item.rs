@@ -4,7 +4,7 @@
 //! Like `block.rs`, this file is the API and not the content. Names, stack
 //! sizes, tool tiers, durability, damage, what each block drops and what tool
 //! it demands all come from `assets/data/items.ron` and `assets/data/blocks.ron`
-//! by way of [`crate::block::registry`]. The ids stay here, frozen, because
+//! by way of [`crate::content::registry`]. The ids stay here, frozen, because
 //! save files and `match` patterns both need them at compile time.
 //!
 //! Numbering rule, and it matters because save files store raw ids: item ids
@@ -13,8 +13,8 @@
 //! data that breaks that. Non-block items start at 100. Never renumber an
 //! existing id; only append.
 
-use crate::block::BlockId;
-use crate::block::registry;
+use crate::content::block::BlockId;
+use crate::content::registry;
 
 // --- block ids this module needs that `block.rs` does not define yet ---------
 //
@@ -145,7 +145,7 @@ impl ItemId {
     ///
     /// Items added purely in `items.ron` are absent from here but present
     /// everywhere else -- `is_valid`, `name`, crafting -- and draw with the
-    /// missing-texture tile. Use [`crate::block::registry::Registry::item_ids`]
+    /// missing-texture tile. Use [`crate::content::registry::Registry::item_ids`]
     /// for everything the registry knows.
     pub const ALL: &'static [ItemId] = &[
         ItemId::STONE,

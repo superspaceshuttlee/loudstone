@@ -83,11 +83,11 @@
 //! [`MIN_VERSION`]`..=`[`VERSION`] is refused with
 //! [`SaveError::UnsupportedVersion`] rather than misparsed.
 
-use crate::block::BlockId;
-use crate::crafting::{Furnace, FurnaceState};
-use crate::inventory::{Inventory, ItemStack, SLOT_COUNT};
-use crate::item::ItemId;
-use crate::mob::{DESPAWN_DISTANCE, Mob, MobKind, MobManager};
+use crate::content::block::BlockId;
+use crate::content::crafting::{Furnace, FurnaceState};
+use crate::content::inventory::{Inventory, ItemStack, SLOT_COUNT};
+use crate::content::item::ItemId;
+use crate::sim::mob::{DESPAWN_DISTANCE, Mob, MobKind, MobManager};
 use glam::Vec3;
 use std::collections::HashMap;
 use std::fmt;
@@ -1167,7 +1167,7 @@ pub fn save_exists(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item::{BLOCK_TORCH, ItemId};
+    use crate::content::item::{BLOCK_TORCH, ItemId};
 
     /// A world that stores only what it is told, exercising the *default*
     /// `set_mask_at` (which replays carves one sub-voxel at a time).
@@ -1657,8 +1657,8 @@ mod tests {
     /// respawn, quit, relaunch, find the world exactly as left.
     #[test]
     fn the_whole_survival_loop() {
-        use crate::crafting::{Furnace, craft};
-        use crate::item::{BLOCK_CRAFTING_TABLE, mining_drop};
+        use crate::content::crafting::{Furnace, craft};
+        use crate::content::item::{BLOCK_CRAFTING_TABLE, mining_drop};
 
         let mut data = SaveData::new(2024);
 
@@ -1924,7 +1924,7 @@ mod tests {
 
     #[test]
     fn a_reloaded_mob_comes_back_where_it_was_and_starts_idle() {
-        use crate::mob::MobState;
+        use crate::sim::mob::MobState;
 
         let data = load_from_bytes(&save_to_bytes(&populated())).unwrap();
         let mut mgr = MobManager::new(1);
@@ -1977,7 +1977,7 @@ mod tests {
         assert_eq!(saved.len(), 2, "only the two nearby living mobs");
         assert_eq!(saved[0].kind, MobKind::Zombie);
         assert_eq!(saved[1].kind, MobKind::Pig);
-        assert_eq!(MOB_SAVE_RADIUS, crate::mob::DESPAWN_DISTANCE);
+        assert_eq!(MOB_SAVE_RADIUS, crate::sim::mob::DESPAWN_DISTANCE);
     }
 
     #[test]
@@ -2089,7 +2089,7 @@ mod tests {
     /// mid-smelt, come back to find the ore still there and still cooking.
     #[test]
     fn a_furnace_saved_mid_smelt_reloads_with_its_burn_and_progress() {
-        use crate::crafting::Furnace;
+        use crate::content::crafting::Furnace;
 
         let mut f = Furnace::new();
         f.input = Some(ItemStack::new(ItemId::RAW_IRON, 2));
@@ -2135,7 +2135,7 @@ mod tests {
 
     #[test]
     fn furnace_container_conversion_preserves_live_state() {
-        let mut before = crate::crafting::Furnace::new();
+        let mut before = crate::content::crafting::Furnace::new();
         before.input = Some(ItemStack::new(ItemId::RAW_IRON, 2));
         before.fuel = Some(ItemStack::new(ItemId::COAL, 1));
         before.tick(3.25);

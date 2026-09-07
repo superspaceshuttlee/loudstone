@@ -16,11 +16,11 @@
 //!    back-face culling deleted every vertical face and left horizontal plates
 //!    with see-through gaps between them.
 
-use crate::block::BlockId;
-use crate::chunk::{Chunk, ChunkPos, SubMask, local_index};
 use crate::config::{AO_STRENGTH, CARVE_SHADE, CHUNK_SIZE, FACE_SHADE, SUBVOX};
-use crate::light;
-use crate::worldgen::TerrainGen;
+use crate::content::block::BlockId;
+use crate::world::chunk::{Chunk, ChunkPos, SubMask, local_index};
+use crate::world::light;
+use crate::world::worldgen::TerrainGen;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -390,7 +390,7 @@ fn emit_cross_block(
     let (wx, wy, wz) = ((ox + x) as f32, (oy + y) as f32, (oz + z) as f32);
     // Inset slightly so a plant never z-fights the block it stands on.
     let (lo, hi) = (0.1464, 0.8536);
-    let rect = crate::texture::tile_uv_rect(crate::texture::block_tile(id, 3));
+    let rect = crate::render::texture::tile_uv_rect(crate::render::texture::block_tile(id, 3));
 
     // Plants are lit by the cell they occupy; they cast no ambient occlusion of
     // their own, so a flat light keeps them from flickering as they sway.
@@ -483,7 +483,7 @@ fn emit_full_block(
             continue;
         }
         let shade = FACE_SHADE[f];
-        let rect = crate::texture::tile_uv_rect(crate::texture::block_tile(id, f));
+        let rect = crate::render::texture::tile_uv_rect(crate::render::texture::block_tile(id, f));
         let (t, b) = tangents(*n);
         let mut light = [0.0f32; 4];
         let mut corners = [[0.0f32; 3]; 4];
@@ -577,7 +577,9 @@ fn emit_subvoxel_block(
                     if hidden {
                         continue;
                     }
-                    let rect = crate::texture::tile_uv_rect(crate::texture::block_tile(id, f));
+                    let rect = crate::render::texture::tile_uv_rect(
+                        crate::render::texture::block_tile(id, f),
+                    );
                     let mut corners = [[0.0f32; 3]; 4];
                     let mut uvs = [[0.0f32; 2]; 4];
                     for (i, c) in FACE_CORNERS[f].iter().enumerate() {

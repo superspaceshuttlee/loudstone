@@ -1,14 +1,14 @@
 //! wgpu setup, the terrain pipeline, the target-block highlight, and the HUD pass.
 
-use crate::camera::{Camera, CameraUniform};
-use crate::chunk::ChunkPos;
 use crate::config::{
     CHUNK_SIZE_I, FOG_END_FRAC, FOG_START_FRAC, HIGHLIGHT_COLOR, HIGHLIGHT_INFLATE,
     render_distance_blocks,
 };
-use crate::hud::Hud;
-use crate::mesh::Vertex;
+use crate::render::hud::Hud;
+use crate::render::mesh::Vertex;
+use crate::sim::camera::{Camera, CameraUniform};
 use crate::world::ChunkMeshData;
+use crate::world::chunk::ChunkPos;
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -204,12 +204,12 @@ impl Renderer {
         // at startup with its own mip chain. Magnification is nearest so the
         // pixel art stays crisp; minification is linear across mips so distant
         // terrain does not shimmer.
-        let atlas = crate::texture::atlas();
+        let atlas = crate::render::texture::atlas();
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("block atlas"),
             size: wgpu::Extent3d {
-                width: crate::texture::ATLAS_W as u32,
-                height: crate::texture::ATLAS_H as u32,
+                width: crate::render::texture::ATLAS_W as u32,
+                height: crate::render::texture::ATLAS_H as u32,
                 depth_or_array_layers: 1,
             },
             mip_level_count: atlas.levels.len() as u32,
@@ -464,7 +464,7 @@ impl Renderer {
         min: glam::Vec3,
         max: glam::Vec3,
         color: [f32; 3],
-        tile: crate::texture::TileId,
+        tile: crate::render::texture::TileId,
     ) {
         push_box_shaded(
             verts,
@@ -488,7 +488,7 @@ impl Renderer {
         yaw: f32,
         bend: f32,
         color: [f32; 3],
-        tiles: [crate::texture::TileId; 6],
+        tiles: [crate::render::texture::TileId; 6],
     ) {
         push_model_box_shaded(
             verts, indices, pivot, local_min, local_max, yaw, bend, color, tiles,
@@ -730,7 +730,7 @@ impl Renderer {
         drop(data);
         buf.unmap();
 
-        match crate::screenshot::write_rgba_png(path, w, h, &rgba) {
+        match crate::render::screenshot::write_rgba_png(path, w, h, &rgba) {
             Ok(()) => println!("[loudstone] screenshot written to {}", path.display()),
             Err(e) => eprintln!("[loudstone] screenshot failed: {e}"),
         }
@@ -825,7 +825,7 @@ fn push_box(
 /// The atlas coordinate of the plain white tile, for geometry that carries its
 /// own colour and wants the texture to contribute nothing.
 fn white_uv() -> [f32; 2] {
-    let r = crate::texture::tile_uv_rect(crate::texture::T_WHITE);
+    let r = crate::render::texture::tile_uv_rect(crate::render::texture::T_WHITE);
     [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5]
 }
 
@@ -835,7 +835,7 @@ fn push_box_shaded(
     origin: [f32; 3],
     size: [f32; 3],
     color: [f32; 3],
-    tile: crate::texture::TileId,
+    tile: crate::render::texture::TileId,
 ) {
     let p = |xh: bool, yh: bool, zh: bool| {
         [
@@ -864,7 +864,7 @@ fn push_box_shaded(
     ];
     for (fi, f) in FACES.iter().enumerate() {
         let light = crate::config::FACE_SHADE[fi];
-        let rect = crate::texture::tile_uv_rect(tile);
+        let rect = crate::render::texture::tile_uv_rect(tile);
         let base = verts.len() as u32;
         for (k, &i) in f.iter().enumerate() {
             // A box has no per-corner UV convention of its own, so the four
@@ -894,7 +894,7 @@ fn push_model_box_shaded(
     yaw: f32,
     bend: f32,
     color: [f32; 3],
-    tiles: [crate::texture::TileId; 6],
+    tiles: [crate::render::texture::TileId; 6],
 ) {
     let (sy, cy) = yaw.sin_cos();
     let (sb, cb) = bend.sin_cos();
@@ -929,7 +929,7 @@ fn push_model_box_shaded(
     const BOX_UV: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
 
     for (face_index, face) in FACES.iter().enumerate() {
-        let rect = crate::texture::tile_uv_rect(tiles[face_index]);
+        let rect = crate::render::texture::tile_uv_rect(tiles[face_index]);
         let base = verts.len() as u32;
         for (corner_index, &corner) in face.iter().enumerate() {
             let uv = BOX_UV[corner_index];

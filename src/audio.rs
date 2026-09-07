@@ -42,7 +42,7 @@ use std::time::Instant;
 
 use glam::Vec3;
 
-use crate::block::BlockId;
+use crate::content::block::BlockId;
 
 // =============================================================================
 // ============================  TUNING BLOCK  =================================

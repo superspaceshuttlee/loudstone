@@ -94,35 +94,60 @@ project's history were invisible to tests and obvious in a screenshot.
 
 ## 3. Module map
 
-| File | Responsibility |
-|---|---|
-| `main.rs` | Window, event loop, `App` state, and the wiring between systems |
-| `cli.rs` | Command-line options, parsed once into one `Cli` value |
-| `session.rs` | `Hands` (what the player is doing) and `Stats` (counters) |
-| `ui.rs` | Menu and panel layout, drawing, and the stack-moving rules |
-| `daylight.rs` | The day/night cycle: brightness, sky colour, sun direction |
-| `config.rs` | **Every tunable number.** Look/feel, physics, mining rates, streaming budgets |
-| `world.rs` | Chunk map, threaded streaming, raycast, carving, block queries |
-| `chunk.rs` | Chunk storage and the sparse sub-voxel damage masks |
-| `worldgen.rs` | Seeded terrain: biomes, caves, ores, trees, water |
-| `mesh.rs` | Chunk meshing: face culling, ambient occlusion, sub-voxel geometry, UVs |
-| `light.rs` | Block and sky light, flood propagation and de-lighting |
-| `gfx.rs` | wgpu device, terrain pipeline, atlas upload, highlight, entity geometry |
-| `texture.rs` | The generated texture atlas and every block/item/mob tile |
-| `registry.rs` / `assets/data/*.ron` | Validated block, item, recipe, and smelting data |
-| `shader.wgsl` / `hud.wgsl` | Terrain and overlay shaders |
-| `hud.rs` | Overlay: crosshair, hotbar, health, panels, and a hand-coded 5x7 font |
-| `camera.rs` | Camera, player body, physics, collision, step-up |
-| `block.rs` `item.rs` `inventory.rs` `crafting.rs` | Content definitions and rules |
-| `save.rs` | Binary save format and the durable edit log |
-| `sound.rs` | Noise **propagation model** for mob AI. Makes no audible sound |
-| `audio.rs` | What the player actually hears. Synthesised, no sample files |
-| `mob.rs` `pathfind.rs` | Mob entities, AI state machine, A* over voxels |
-| `gauntlet.rs` | The randomised property-based playtest harness |
-| `screenshot.rs` | Dependency-free PNG writer |
+Modules are grouped by domain, one directory each. The rule for where something
+belongs is what it *knows about*, not what it is made of: `content` knows what a
+block is and nothing about drawing one; `render` knows how to draw and nothing
+about what a world contains.
 
-`sound.rs` and `audio.rs` are easy to confuse and are unrelated. `sound.rs` is
-simulation; `audio.rs` is output.
+```
+src/
+  main.rs        the App, the winit event loop, and the wiring between systems
+  config.rs      EVERY tunable number: feel, physics, mining rates, budgets
+  audio.rs       what the player hears. Synthesised; there are no sample files
+
+  app/           the shell: how the game is launched and driven
+    cli.rs       command-line options, parsed once into one value
+    ui.rs        menu and panel layout, drawing, and the stack-moving rules
+
+  content/       what the game is made of, and the rules for combining it
+    registry.rs  the validated tables; the single source of truth
+    block.rs     block ids and their queries
+    item.rs      item ids, tools, tiers
+    inventory.rs slots, stacks, durability
+    crafting.rs  recipes, and the furnace
+
+  world/         the voxel world
+    mod.rs       chunk map, threaded streaming, raycast, carving, water flow
+    chunk.rs     chunk storage and the sparse sub-voxel damage masks
+    worldgen.rs  seeded terrain: continents, biomes, caves, ores, trees, water
+    light.rs     block and sky light, flood propagation and de-lighting
+
+  render/        everything that reaches the GPU
+    gfx.rs       device, pipelines, atlas upload, entity geometry
+    mesh.rs      chunk meshing: face culling, AO, sub-voxel geometry, UVs
+    texture.rs   the generated atlas: every block, item and mob tile
+    model.rs     the humanoid and quadruped rigs
+    hud.rs       overlay: crosshair, hotbar, panels, and a hand-coded font
+    screenshot.rs a dependency-free PNG writer
+    shader.wgsl / hud.wgsl
+
+  sim/           the things that move, and the clock they move under
+    camera.rs    camera, player body, physics, collision, step-up
+    mob.rs       mob entities and the AI state machine
+    pathfind.rs  A* over voxels
+    sound.rs     the noise PROPAGATION MODEL for mob AI. Makes no audible sound
+    daylight.rs  brightness, sky colour and sun direction, as pure functions
+    session.rs   Hands (what the player is doing) and Stats (counters)
+
+  persist/save.rs   the binary save format and the durable edit log
+  dev/gauntlet.rs   the randomised property-based playtest harness
+
+assets/data/*.ron   the content tables. See assets/README.md
+docs/               design notes and the frozen inter-agent contract
+```
+
+`sim/sound.rs` and `audio.rs` are easy to confuse and are unrelated.
+`sound.rs` is simulation; `audio.rs` is output.
 
 ---
 

@@ -9,9 +9,9 @@
 //! mirroring, so a pickaxe crafted in the right-hand columns still works.
 //! Shapeless recipes ignore position entirely.
 
-use crate::block::registry;
-use crate::inventory::ItemStack;
-use crate::item::ItemId;
+use crate::content::inventory::ItemStack;
+use crate::content::item::ItemId;
+use crate::content::registry;
 
 /// Slot count of the inventory's 2x2 grid.
 pub const GRID_2X2: usize = 4;

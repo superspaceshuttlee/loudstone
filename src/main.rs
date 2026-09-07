@@ -6,54 +6,36 @@
 //! Chipping is slow and quiet. Smashing a whole block out is fast and loud.
 //! Every mining decision is therefore a bet on speed against safety.
 
+mod app;
 mod audio;
-mod block;
-mod camera;
-mod chunk;
-mod cli;
 mod config;
-mod crafting;
-mod daylight;
-mod gauntlet;
-mod gfx;
-mod hud;
-mod inventory;
-mod item;
-mod light;
-mod mesh;
-mod mob;
-mod model;
-mod pathfind;
-mod save;
-mod screenshot;
-mod session;
-mod sound;
-mod texture;
-mod ui;
+mod content;
+mod dev;
+mod persist;
+mod render;
+mod sim;
 mod world;
-mod worldgen;
 
-use block::BlockId;
-use camera::{Camera, MoveInput, Player};
-use chunk::ChunkPos;
-use cli::Cli;
-use config::*;
-use daylight::{DAY_FRACTION, DAY_LENGTH, daylight_at, sky_for, sun_for};
-use glam::Vec3;
-use hud::Slot;
-use inventory::ItemStack;
-use item::ItemId;
-use mob::{MobEvent, MobKind, MobManager, PlayerState};
-use session::{Hands, Stats};
-use sound::SoundField;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Instant;
-use ui::{
+use app::cli::Cli;
+use app::ui::{
     SLOT_PX, TitleAction, craft_output_rect, craft_rect, draw_panel, draw_title_screen,
     furnace_rect, merge_into_cell, return_panel_items, slot_rect, store_output, swap_carried,
     title_action,
 };
+use config::*;
+use content::block::BlockId;
+use content::inventory::ItemStack;
+use content::item::ItemId;
+use glam::Vec3;
+use render::hud::Slot;
+use sim::camera::{Camera, MoveInput, Player};
+use sim::daylight::{DAY_FRACTION, DAY_LENGTH, daylight_at, sky_for, sun_for};
+use sim::mob::{MobEvent, MobKind, MobManager, PlayerState};
+use sim::session::{Hands, Stats};
+use sim::sound::SoundField;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{
     DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
@@ -62,6 +44,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 use world::World;
+use world::chunk::ChunkPos;
 
 // ---------------------------------------------------------------------------
 // The two trait bridges. Both modules were written against narrow traits so
@@ -69,7 +52,7 @@ use world::World;
 // where they meet the real world.
 // ---------------------------------------------------------------------------
 
-impl sound::VoxelWorld for World {
+impl sim::sound::VoxelWorld for World {
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId {
         World::block_at(self, x, y, z)
     }
@@ -87,7 +70,7 @@ impl sound::VoxelWorld for World {
     }
 }
 
-impl save::WorldEdit for World {
+impl persist::save::WorldEdit for World {
     fn set_block_at(&mut self, x: i32, y: i32, z: i32, id: BlockId) {
         self.set_block(x, y, z, id);
     }
@@ -106,18 +89,18 @@ impl save::WorldEdit for World {
 /// the texture, and giving each kind its own geometry is what made an earlier
 /// attempt look like it belonged to a different game.
 fn append_mob_model(
-    verts: &mut Vec<mesh::Vertex>,
+    verts: &mut Vec<render::mesh::Vertex>,
     indices: &mut Vec<u32>,
-    m: &mob::Mob,
+    m: &sim::mob::Mob,
     light: f32,
 ) {
-    let kind_index = mob::MobKind::ALL
+    let kind_index = sim::mob::MobKind::ALL
         .iter()
         .position(|k| *k == m.kind)
         .unwrap_or(0);
     let speed = Vec3::new(m.vel.x, 0.0, m.vel.z).length();
 
-    let pose = model::Pose {
+    let pose = render::model::Pose {
         // Driving the gait by distance travelled rather than by a clock is what
         // stops the legs cycling while the mob is stuck against a wall.
         stride: m.gait * 6.0,
@@ -125,13 +108,13 @@ fn append_mob_model(
         head_yaw: 0.0,
         head_pitch: 0.0,
         attack: 0.0,
-        arms_forward: if m.kind == mob::MobKind::Zombie {
+        arms_forward: if m.kind == sim::mob::MobKind::Zombie {
             1.0
         } else {
             0.0
         },
-        waddle: m.kind == mob::MobKind::Creeper,
-        on_all_fours: m.kind == mob::MobKind::Pig,
+        waddle: m.kind == sim::mob::MobKind::Creeper,
+        on_all_fours: m.kind == sim::mob::MobKind::Pig,
     };
 
     // Every rig is built at true scale now. The pig used to be drawn at 0.8
@@ -141,13 +124,13 @@ fn append_mob_model(
     // around inside its own hitbox.
     let scale = 1.0;
 
-    let parts = if m.kind == mob::MobKind::Pig {
-        model::quadruped()
+    let parts = if m.kind == sim::mob::MobKind::Pig {
+        render::model::quadruped()
     } else {
-        model::humanoid()
+        render::model::humanoid()
     };
 
-    model::append(
+    render::model::append(
         parts, kind_index, verts, indices, m.pos, m.yaw, scale, &pose, light,
     );
 }
@@ -187,7 +170,7 @@ impl Ui {
 /// the app layer, where a later event cannot reconstruct the exact ragged mask.
 struct TrackedWorld<'a> {
     world: &'a mut World,
-    edits: &'a mut save::ChangeTracker,
+    edits: &'a mut persist::save::ChangeTracker,
 }
 
 impl TrackedWorld<'_> {
@@ -200,7 +183,7 @@ impl TrackedWorld<'_> {
     }
 }
 
-impl sound::VoxelWorld for TrackedWorld<'_> {
+impl sim::sound::VoxelWorld for TrackedWorld<'_> {
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId {
         self.world.block_at(x, y, z)
     }
@@ -230,13 +213,15 @@ impl sound::VoxelWorld for TrackedWorld<'_> {
     }
 }
 
-fn restore_mobs(data: &save::SaveData, mobs: &mut MobManager) {
+fn restore_mobs(data: &persist::save::SaveData, mobs: &mut MobManager) {
     for saved in &data.mobs {
         saved.spawn_into(mobs);
     }
 }
 
-fn restore_furnaces(data: &save::SaveData) -> HashMap<save::BlockPos, crafting::Furnace> {
+fn restore_furnaces(
+    data: &persist::save::SaveData,
+) -> HashMap<persist::save::BlockPos, content::crafting::Furnace> {
     data.containers
         .iter()
         .filter_map(|(&pos, saved)| saved.to_furnace().map(|furnace| (pos, furnace)))
@@ -244,18 +229,18 @@ fn restore_furnaces(data: &save::SaveData) -> HashMap<save::BlockPos, crafting::
 }
 
 fn capture_live_state(
-    data: &mut save::SaveData,
+    data: &mut persist::save::SaveData,
     mobs: &MobManager,
-    furnaces: &HashMap<save::BlockPos, crafting::Furnace>,
+    furnaces: &HashMap<persist::save::BlockPos, content::crafting::Furnace>,
     player_pos: Vec3,
 ) {
     data.capture_mobs(mobs.mobs(), player_pos);
     // Preserve unknown future container kinds, while replacing every furnace
     // record with the current simulation state.
     data.containers
-        .retain(|_, container| container.kind != save::ContainerKind::FURNACE);
+        .retain(|_, container| container.kind != persist::save::ContainerKind::FURNACE);
     for (&pos, furnace) in furnaces {
-        data.set_container(pos, save::ContainerSave::from_furnace(furnace));
+        data.set_container(pos, persist::save::ContainerSave::from_furnace(furnace));
     }
 }
 
@@ -281,9 +266,9 @@ fn capture_live_state(
 const GAUNTLET_STEP: f32 = 1.0 / 60.0;
 
 fn forget_orphan_furnaces(
-    furnaces: &mut HashMap<save::BlockPos, crafting::Furnace>,
-    lo: save::BlockPos,
-    hi: save::BlockPos,
+    furnaces: &mut HashMap<persist::save::BlockPos, content::crafting::Furnace>,
+    lo: persist::save::BlockPos,
+    hi: persist::save::BlockPos,
     block_at: impl Fn(i32, i32, i32) -> BlockId,
 ) -> Vec<ItemStack> {
     let mut salvaged = Vec::new();
@@ -304,7 +289,7 @@ fn forget_orphan_furnaces(
 }
 
 fn replay_arrived_chunks(
-    data: &mut save::SaveData,
+    data: &mut persist::save::SaveData,
     world: &mut World,
     replayed: &mut HashSet<ChunkPos>,
     arrived: &[ChunkPos],
@@ -318,7 +303,7 @@ fn replay_arrived_chunks(
 
 struct App {
     window: Option<Arc<Window>>,
-    gfx: Option<gfx::Renderer>,
+    gfx: Option<render::gfx::Renderer>,
     world: World,
     camera: Camera,
     player: Player,
@@ -334,7 +319,7 @@ struct App {
     step_accum: f32,
 
     /// Seed, player record, inventory and the durable edit log. This IS the save.
-    data: save::SaveData,
+    data: persist::save::SaveData,
     save_path: std::path::PathBuf,
     has_save: bool,
     time_since_save: f32,
@@ -347,7 +332,7 @@ struct App {
     craft_grid: [Option<ItemStack>; 9],
     /// Furnace contents, keyed by the block they belong to, so two furnaces do
     /// not share one inventory.
-    furnaces: HashMap<(i32, i32, i32), crafting::Furnace>,
+    furnaces: HashMap<(i32, i32, i32), content::crafting::Furnace>,
     /// The stack held by the cursor in the inventory screen.
     carried: Option<ItemStack>,
     cursor: (f32, f32),
@@ -374,7 +359,7 @@ struct App {
     /// simulation.
     stats: Stats,
     /// `--gauntlet`: a robot plays the game and reports what broke.
-    gauntlet: Option<gauntlet::Harness>,
+    gauntlet: Option<dev::gauntlet::Harness>,
     save_roundtrip: Option<bool>,
     /// Multiplier on the day/night clock, driven by the gauntlet.
     time_scale: f32,
@@ -413,7 +398,7 @@ impl App {
         let gauntlet_seed = cli.gauntlet_seed;
         let save_path = match gauntlet_seed {
             Some(_) => std::env::temp_dir().join("loudstone_gauntlet_world.lsw"),
-            None => save::default_save_path(),
+            None => persist::save::default_save_path(),
         };
         if let Some(seed) = gauntlet_seed {
             // Start from bare terrain every time, or yesterday's run leaks into
@@ -424,20 +409,20 @@ impl App {
                 save_path.display()
             );
         }
-        let (data, has_save) = if save::save_exists(&save_path) {
-            match save::load_from_file(&save_path) {
+        let (data, has_save) = if persist::save::save_exists(&save_path) {
+            match persist::save::load_from_file(&save_path) {
                 Ok(d) => {
                     println!("[loudstone] loaded save (seed {})", d.seed);
                     (d, true)
                 }
                 Err(e) => {
                     eprintln!("[loudstone] could not load save: {e} -- starting fresh");
-                    (save::SaveData::new(1337), false)
+                    (persist::save::SaveData::new(1337), false)
                 }
             }
         } else {
             (
-                save::SaveData::new(gauntlet_seed.unwrap_or(1337) as u32),
+                persist::save::SaveData::new(gauntlet_seed.unwrap_or(1337) as u32),
                 false,
             )
         };
@@ -492,9 +477,9 @@ impl App {
             // The same seed that chose the world above also drives the robot,
             // so the whole session is a pure function of `--seed`.
             gauntlet: cli.gauntlet_seed.map(|seed| {
-                let secs = cli.gauntlet_secs.unwrap_or(gauntlet::DEFAULT_SECONDS);
+                let secs = cli.gauntlet_secs.unwrap_or(dev::gauntlet::DEFAULT_SECONDS);
                 println!("[gauntlet] seed {seed}, {secs:.0}s session");
-                gauntlet::Harness::new(seed, secs)
+                dev::gauntlet::Harness::new(seed, secs)
             }),
             cli,
             hands: Hands::default(),
@@ -544,7 +529,7 @@ impl App {
         self.data.player.yaw = self.camera.yaw;
         self.data.player.pitch = self.camera.pitch;
         capture_live_state(&mut self.data, &self.mobs, &self.furnaces, self.player.pos);
-        match save::save_to_file(&self.save_path, &self.data) {
+        match persist::save::save_to_file(&self.save_path, &self.data) {
             Ok(()) => {
                 self.time_since_save = 0.0;
                 self.has_save = true;
@@ -572,7 +557,7 @@ impl App {
         let spawn = Vec3::new(0.5, ground, 0.5);
         let aspect = self.camera.aspect;
 
-        self.data = save::SaveData::new(seed);
+        self.data = persist::save::SaveData::new(seed);
         self.world = world;
         self.spawn = spawn;
         self.player = Player::new(spawn);
@@ -637,7 +622,7 @@ impl App {
                     );
                     self.data.inventory.damage_selected(1);
                     // Swinging is loud: a fight is not a quiet way to spend time.
-                    self.sound.emit(sound::NoiseEvent {
+                    self.sound.emit(sim::sound::NoiseEvent {
                         pos: self.camera.pos,
                         loudness: NOISE_ATTACK,
                     });
@@ -690,7 +675,7 @@ impl App {
                     }
                     // Quiet and slow: carve a small sphere of sub-voxels. Hard
                     // blocks take proportionally longer per bite.
-                    let speed = item::mining_speed_multiplier(tool, target);
+                    let speed = content::item::mining_speed_multiplier(tool, target);
                     self.hands.chip_timer = CHIP_INTERVAL * target.hardness() / speed.max(0.01);
 
                     let t = self.hands.target.unwrap_or(aimed);
@@ -924,14 +909,15 @@ impl App {
                 let x = -span + ix as i32 * step;
                 let z = -span + iy as i32 * step;
                 let h = terrain.height_at(x, z);
-                let water = h <= worldgen::tuning::WATER_LEVEL;
+                let water = h <= world::worldgen::tuning::WATER_LEVEL;
                 // Height as brightness, with a shaded relief term so ridges and
                 // valleys read as shape rather than as a smooth gradient.
                 let west = terrain.height_at(x - step, z);
                 let relief = ((h - west) as f32 * 0.10).clamp(-0.35, 0.35);
                 let t = ((h - 40) as f32 / 180.0).clamp(0.0, 1.0);
                 let rgb = if water {
-                    let d = ((worldgen::tuning::WATER_LEVEL - h) as f32 / 40.0).clamp(0.0, 1.0);
+                    let d =
+                        ((world::worldgen::tuning::WATER_LEVEL - h) as f32 / 40.0).clamp(0.0, 1.0);
                     [0.15 - d * 0.1, 0.35 - d * 0.2, 0.70 - d * 0.3]
                 } else {
                     let top = terrain.column(x, z).top;
@@ -950,7 +936,7 @@ impl App {
                 px[o + 3] = 255;
             }
         }
-        match screenshot::write_rgba_png(path, n, n, &px) {
+        match render::screenshot::write_rgba_png(path, n, n, &px) {
             Ok(()) => println!(
                 "[map] {n}x{n} covering {} blocks -> {}",
                 span * 2,
@@ -1111,7 +1097,7 @@ impl App {
         }
 
         let eye = self.player.eye();
-        let probe = gauntlet::Probe {
+        let probe = dev::gauntlet::Probe {
             pos: self.player.pos,
             vel: self.player.vel,
             on_ground: self.player.on_ground,
@@ -1197,7 +1183,7 @@ impl App {
             for c in self.craft_grid.iter_mut().take(4) {
                 *c = Some(ItemStack::new(ItemId::PLANKS, 1));
             }
-            if let Some(out) = crafting::craft(&mut self.craft_grid[..4]) {
+            if let Some(out) = content::crafting::craft(&mut self.craft_grid[..4]) {
                 self.data.inventory.add_item(out.item, out.count as u32);
                 self.stats.crafted += 1;
             }
@@ -1260,10 +1246,10 @@ impl App {
         self.data.player.pos = self.player.pos;
         capture_live_state(&mut self.data, &self.mobs, &self.furnaces, self.player.pos);
         let path = std::env::temp_dir().join("loudstone_gauntlet_roundtrip.lsw");
-        if save::save_to_file(&path, &self.data).is_err() {
+        if persist::save::save_to_file(&path, &self.data).is_err() {
             return false;
         }
-        match save::load_from_file(&path) {
+        match persist::save::load_from_file(&path) {
             Ok(back) => {
                 let mut same = back.seed == self.data.seed
                     && back.player.pos == self.data.player.pos
@@ -1303,7 +1289,7 @@ impl App {
 
         if which == "furnace" {
             let key = (0, 0, 0);
-            let mut f = crafting::Furnace::new();
+            let mut f = content::crafting::Furnace::new();
             f.input = Some(ItemStack::new(ItemId::RAW_IRON, 3));
             f.fuel = Some(ItemStack::new(ItemId::COAL, 2));
             // Run it far enough to light the fire and part-fill the bar.
@@ -1364,7 +1350,7 @@ impl App {
     /// into the player's pack, since they broke it deliberately and the items
     /// have nowhere else to go -- there are no item entities in this game to
     /// scatter them onto the ground. Anything that will not fit is lost.
-    fn break_furnace_at(&mut self, pos: save::BlockPos) {
+    fn break_furnace_at(&mut self, pos: persist::save::BlockPos) {
         let world = &self.world;
         let salvage = forget_orphan_furnaces(&mut self.furnaces, pos, pos, |x, y, z| {
             world.block_at(x, y, z)
@@ -1375,7 +1361,7 @@ impl App {
     }
 
     fn grant_drop(&mut self, tool: Option<ItemId>, broken: BlockId) {
-        if let Some(dropped) = item::mining_drop(tool, broken) {
+        if let Some(dropped) = content::item::mining_drop(tool, broken) {
             self.data.inventory.add_item(dropped, 1);
         }
         self.data.inventory.damage_selected(1);
@@ -1462,7 +1448,7 @@ impl App {
 
         // --- sound, then the mobs that listen to it ---
         for ev in self.world.drain_noise() {
-            self.sound.emit(sound::NoiseEvent {
+            self.sound.emit(sim::sound::NoiseEvent {
                 pos: ev.pos,
                 loudness: ev.loudness,
             });
@@ -1546,7 +1532,7 @@ impl App {
         self.time_since_save += dt;
         // Panel stacks temporarily live outside SaveData. Keep the last complete
         // save until the panel closes rather than writing an incomplete snapshot.
-        if save::should_autosave(self.time_since_save) && !self.ui.is_panel() {
+        if persist::save::should_autosave(self.time_since_save) && !self.ui.is_panel() {
             self.save_now();
         }
     }
@@ -1570,18 +1556,18 @@ impl App {
                 m.pos.z.floor() as i32,
                 daylight,
             );
-            let light = light::brightness(l as f32).max(0.12);
+            let light = world::light::brightness(l as f32).max(0.12);
             append_mob_model(&mut verts, &mut indices, m, light);
         }
 
         for p in self.mobs.projectiles() {
-            gfx::Renderer::box_geometry(
+            render::gfx::Renderer::box_geometry(
                 &mut verts,
                 &mut indices,
                 p.pos - Vec3::splat(0.06),
                 p.pos + Vec3::splat(0.06),
                 [0.85, 0.85, 0.88],
-                texture::T_WHITE,
+                render::texture::T_WHITE,
             );
         }
 
@@ -1603,7 +1589,15 @@ impl App {
             .inventory
             .hotbar()
             .iter()
-            .map(|s| s.map(|st| Slot::new(texture::item_tile(st.item), [1.0; 3], st.count as u16)))
+            .map(|s| {
+                s.map(|st| {
+                    Slot::new(
+                        render::texture::item_tile(st.item),
+                        [1.0; 3],
+                        st.count as u16,
+                    )
+                })
+            })
             .collect();
         if self.ui == Ui::Playing && self.cli.model_demo.is_none() {
             gfx.hud.hotbar(&slots, self.data.inventory.selected());
@@ -1637,7 +1631,7 @@ impl App {
             gfx.hud.text_shadowed(
                 w * 0.5 - 60.0,
                 h * 0.5 - 40.0,
-                hud::TEXT_SIZE,
+                render::hud::TEXT_SIZE,
                 [1.0, 1.0, 1.0, 1.0],
                 "loading world",
             );
@@ -1701,7 +1695,7 @@ impl App {
             let (cx, cy) = craft_output_rect(w, h, cells);
             if inside(cx, cy, SLOT_PX) {
                 let mut candidate = self.craft_grid;
-                if let Some(out) = crafting::craft(&mut candidate[..cells]) {
+                if let Some(out) = content::crafting::craft(&mut candidate[..cells]) {
                     if store_output(&mut self.data.inventory, &mut self.carried, out) {
                         self.craft_grid = candidate;
                     }
@@ -1739,7 +1733,7 @@ impl ApplicationHandler for App {
             .with_title("Loudstone")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let renderer = pollster::block_on(gfx::Renderer::new(window.clone()));
+        let renderer = pollster::block_on(render::gfx::Renderer::new(window.clone()));
         self.camera.aspect = renderer.config.width as f32 / renderer.config.height as f32;
         self.gfx = Some(renderer);
         self.window = Some(window);
@@ -2060,7 +2054,7 @@ fn digit_row(code: KeyCode) -> Option<usize> {
 }
 
 fn main() {
-    if let Err(error) = block::registry::init() {
+    if let Err(error) = content::registry::init() {
         eprintln!("[loudstone] {error}");
         eprintln!("[loudstone] falling back to the built-in content data");
     }
@@ -2137,7 +2131,7 @@ mod tests {
             stack(ItemId::STICK, 1),
         ];
         assert!(
-            crafting::resolve(&two).is_none(),
+            content::crafting::resolve(&two).is_none(),
             "a pickaxe must not be craftable in the 2x2 grid"
         );
 
@@ -2152,19 +2146,19 @@ mod tests {
             stack(ItemId::STICK, 1),
             None,
         ];
-        let out = crafting::resolve(&three).expect("3x3 must resolve a stone pickaxe");
+        let out = content::crafting::resolve(&three).expect("3x3 must resolve a stone pickaxe");
         assert_eq!(out.item, ItemId::STONE_PICKAXE);
     }
 
     #[test]
     fn the_full_progression_from_bare_hands_to_an_iron_ingot() {
-        let mut inv = inventory::Inventory::new();
+        let mut inv = content::inventory::Inventory::new();
 
         // Punch a tree: wood -> planks -> sticks, both 2x2 recipes.
         inv.add_item(ItemId::WOOD, 2);
         let mut g = [None; 9];
         g[0] = stack(ItemId::WOOD, 1);
-        let planks = crafting::craft(&mut g[..4]).expect("wood makes planks");
+        let planks = content::crafting::craft(&mut g[..4]).expect("wood makes planks");
         assert_eq!(planks.item, ItemId::PLANKS);
         inv.add_item(planks.item, planks.count as u32);
 
@@ -2173,7 +2167,7 @@ mod tests {
         for c in g.iter_mut().take(4) {
             *c = stack(ItemId::PLANKS, 1);
         }
-        let table = crafting::craft(&mut g[..4]).expect("four planks make a table");
+        let table = content::crafting::craft(&mut g[..4]).expect("four planks make a table");
         assert_eq!(table.item, ItemId::CRAFTING_TABLE);
 
         // At the table: a stone pickaxe.
@@ -2183,25 +2177,25 @@ mod tests {
         }
         g[4] = stack(ItemId::STICK, 1);
         g[7] = stack(ItemId::STICK, 1);
-        let pick = crafting::craft(&mut g[..9]).expect("the table makes a stone pickaxe");
+        let pick = content::crafting::craft(&mut g[..9]).expect("the table makes a stone pickaxe");
         assert_eq!(pick.item, ItemId::STONE_PICKAXE);
 
         // That pickaxe is exactly what iron ore requires -- a wooden one is not.
-        assert!(item::can_harvest(
+        assert!(content::item::can_harvest(
             Some(ItemId::STONE_PICKAXE),
             BlockId::IRON_ORE
         ));
-        assert!(!item::can_harvest(
+        assert!(!content::item::can_harvest(
             Some(ItemId::WOODEN_PICKAXE),
             BlockId::IRON_ORE
         ));
         assert_eq!(
-            item::mining_drop(Some(ItemId::STONE_PICKAXE), BlockId::IRON_ORE),
+            content::item::mining_drop(Some(ItemId::STONE_PICKAXE), BlockId::IRON_ORE),
             Some(ItemId::RAW_IRON)
         );
 
         // Smelt it. Coal is the fuel; the furnace ticks on its own.
-        let mut f = crafting::Furnace::new();
+        let mut f = content::crafting::Furnace::new();
         f.input = stack(ItemId::RAW_IRON, 1);
         f.fuel = stack(ItemId::COAL, 1);
         for _ in 0..1200 {
@@ -2217,13 +2211,13 @@ mod tests {
         }
         g[4] = stack(ItemId::STICK, 1);
         g[7] = stack(ItemId::STICK, 1);
-        let iron_pick = crafting::craft(&mut g[..9]).expect("ingots make an iron pickaxe");
+        let iron_pick = content::crafting::craft(&mut g[..9]).expect("ingots make an iron pickaxe");
         assert_eq!(iron_pick.item, ItemId::IRON_PICKAXE);
-        assert!(item::can_harvest(
+        assert!(content::item::can_harvest(
             Some(ItemId::IRON_PICKAXE),
             BlockId::DIAMOND_ORE
         ));
-        assert!(!item::can_harvest(
+        assert!(!content::item::can_harvest(
             Some(ItemId::STONE_PICKAXE),
             BlockId::DIAMOND_ORE
         ));
@@ -2233,7 +2227,7 @@ mod tests {
 
     #[test]
     fn a_furnace_will_not_burn_fuel_with_nothing_to_smelt() {
-        let mut f = crafting::Furnace::new();
+        let mut f = content::crafting::Furnace::new();
         f.fuel = stack(ItemId::COAL, 1);
         for _ in 0..600 {
             f.tick(1.0 / 60.0);
@@ -2247,7 +2241,7 @@ mod tests {
     #[test]
     fn a_broken_furnace_hands_its_contents_back_and_leaves_nothing_behind() {
         let pos = (8, 64, -4);
-        let mut furnace = crafting::Furnace::new();
+        let mut furnace = content::crafting::Furnace::new();
         furnace.input = Some(ItemStack::new(ItemId::RAW_IRON, 2));
         furnace.fuel = Some(ItemStack::new(ItemId::COAL, 1));
         furnace.tick(2.0);
@@ -2276,7 +2270,7 @@ mod tests {
     #[test]
     fn a_furnace_that_is_still_standing_is_left_alone() {
         let pos = (8, 64, -4);
-        let mut furnaces = HashMap::from([(pos, crafting::Furnace::new())]);
+        let mut furnaces = HashMap::from([(pos, content::crafting::Furnace::new())]);
         let salvage = forget_orphan_furnaces(&mut furnaces, pos, pos, |_, _, _| BlockId::FURNACE);
         assert_eq!(furnaces.len(), 1);
         assert!(salvage.is_empty());
@@ -2289,7 +2283,7 @@ mod tests {
     #[test]
     fn a_furnace_outside_the_swept_region_is_never_touched() {
         let far = (900, 64, -900);
-        let mut furnaces = HashMap::from([(far, crafting::Furnace::new())]);
+        let mut furnaces = HashMap::from([(far, content::crafting::Furnace::new())]);
         forget_orphan_furnaces(&mut furnaces, (0, 0, 0), (16, 80, 16), |_, _, _| {
             BlockId::AIR
         });
@@ -2308,13 +2302,13 @@ mod tests {
         live_mobs.spawn(MobKind::Pig, player_pos + Vec3::X);
 
         let furnace_pos = (8, 64, -4);
-        let mut furnace = crafting::Furnace::new();
+        let mut furnace = content::crafting::Furnace::new();
         furnace.input = Some(ItemStack::new(ItemId::RAW_IRON, 2));
         furnace.fuel = Some(ItemStack::new(ItemId::COAL, 1));
         furnace.tick(2.0);
         let live_furnaces = std::collections::HashMap::from([(furnace_pos, furnace)]);
 
-        let mut data = save::SaveData::new(9);
+        let mut data = persist::save::SaveData::new(9);
         capture_live_state(&mut data, &live_mobs, &live_furnaces, player_pos);
         assert_eq!(data.mobs.len(), 1);
         assert!(data.container(furnace_pos).is_some());
@@ -2341,15 +2335,15 @@ mod tests {
         let mut world = World::new(17);
         assert!(world.ensure(ChunkPos::new(0, 4, 0)));
         world.set_block(1, 65, 1, BlockId::STONE);
-        let mut edits = save::ChangeTracker::new();
+        let mut edits = persist::save::ChangeTracker::new();
 
         {
             let mut tracked = TrackedWorld {
                 world: &mut world,
                 edits: &mut edits,
             };
-            sound::VoxelWorld::carve(&mut tracked, 1, 65, 1, 0, 0, 0);
-            sound::VoxelWorld::set_block(&mut tracked, 2, 65, 1, BlockId::AIR);
+            sim::sound::VoxelWorld::carve(&mut tracked, 1, 65, 1, 0, 0, 0);
+            sim::sound::VoxelWorld::set_block(&mut tracked, 2, 65, 1, BlockId::AIR);
         }
 
         assert!(edits.mask_at(1, 65, 1).is_some());
@@ -2367,14 +2361,14 @@ mod tests {
                 }
             }
         }
-        let mut edits = save::ChangeTracker::new();
+        let mut edits = persist::save::ChangeTracker::new();
 
         let report = {
             let mut tracked = TrackedWorld {
                 world: &mut world,
                 edits: &mut edits,
             };
-            mob::explode(&mut tracked, Vec3::new(8.5, 65.5, 8.5), 2.5)
+            sim::mob::explode(&mut tracked, Vec3::new(8.5, 65.5, 8.5), 2.5)
         };
 
         assert!(report.blocks_destroyed + report.blocks_damaged > 0);
@@ -2385,8 +2379,10 @@ mod tests {
     fn saved_edits_replay_when_an_empty_chunk_arrives_without_a_mesh() {
         let pos = ChunkPos::new(0, 10, 0);
         let mut world = World::new(23);
-        world.chunks.insert(pos, Arc::new(chunk::Chunk::new(pos)));
-        let mut data = save::SaveData::new(23);
+        world
+            .chunks
+            .insert(pos, Arc::new(world::chunk::Chunk::new(pos)));
+        let mut data = persist::save::SaveData::new(23);
         data.edits
             .note_set_block(1, pos.y * CHUNK_SIZE_I + 2, 1, BlockId::PLANKS);
         let mut replayed = HashSet::new();
@@ -2402,14 +2398,14 @@ mod tests {
 
     #[test]
     fn closing_a_full_furnace_panel_returns_the_cursor_stack_to_the_furnace() {
-        let mut inventory = inventory::Inventory::new();
-        for index in 0..inventory::SLOT_COUNT {
+        let mut inventory = content::inventory::Inventory::new();
+        for index in 0..content::inventory::SLOT_COUNT {
             inventory.set_slot(index, Some(ItemStack::new(ItemId::DIRT, 64)));
         }
         let coal = ItemStack::new(ItemId::COAL, 8);
         let mut carried = Some(coal);
         let mut grid = [None; 9];
-        let mut furnace = crafting::Furnace::new();
+        let mut furnace = content::crafting::Furnace::new();
 
         assert!(return_panel_items(
             &mut inventory,

@@ -54,7 +54,7 @@ pub struct Slot {
     /// Which atlas tile to draw. For a block item this is an isometric cube
     /// built from that block's own faces; for anything else it is the item's
     /// own icon.
-    pub tile: crate::texture::TileId,
+    pub tile: crate::render::texture::TileId,
     /// Tint multiplied over the art. Left white for most things; biome-tinted
     /// grass uses it the same way the world does.
     pub color: [f32; 3],
@@ -64,7 +64,7 @@ pub struct Slot {
 
 impl Slot {
     /// Convenience constructor.
-    pub fn new(tile: crate::texture::TileId, color: [f32; 3], count: u16) -> Self {
+    pub fn new(tile: crate::render::texture::TileId, color: [f32; 3], count: u16) -> Self {
         Self { tile, color, count }
     }
 }
@@ -367,14 +367,14 @@ impl Batch {
         y: f32,
         w: f32,
         h: f32,
-        tile: crate::texture::TileId,
+        tile: crate::render::texture::TileId,
         tint: [f32; 4],
     ) {
-        let r = crate::texture::tile_uv_rect(tile);
+        let r = crate::render::texture::tile_uv_rect(tile);
         // Half-texel inset. Nearest sampling at a tile's exact edge can land on
         // the neighbouring tile, which shows up as a stray line of some other
         // block down one side of an icon.
-        let e = 0.5 / crate::texture::ATLAS_W as f32;
+        let e = 0.5 / crate::render::texture::ATLAS_W as f32;
         self.quad_mode(
             x,
             y,
@@ -771,8 +771,8 @@ impl Hud {
         // is uploaded: a HUD icon is drawn at a fixed size and never minified,
         // so the rest of the chain would be dead weight.
         let (aw, ah) = (
-            crate::texture::ATLAS_W as u32,
-            crate::texture::ATLAS_H as u32,
+            crate::render::texture::ATLAS_W as u32,
+            crate::render::texture::ATLAS_H as u32,
         );
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("hud item atlas"),
@@ -1023,7 +1023,7 @@ impl Hud {
         // frame. Doing it here rather than in `new` keeps the constructor free
         // of a queue argument.
         if !self.font_uploaded {
-            let items = crate::texture::atlas();
+            let items = crate::render::texture::atlas();
             let (iw, ih, ref ipx) = items.levels[0];
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {

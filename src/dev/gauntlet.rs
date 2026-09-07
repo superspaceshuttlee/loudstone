@@ -27,7 +27,7 @@
 //!   stays in range, and the frame rate never collapses;
 //! * a save round-trip reproduces the world exactly.
 
-use crate::camera::MoveInput;
+use crate::sim::camera::MoveInput;
 use glam::Vec3;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -769,11 +769,11 @@ mod tests {
 /// path. "Mining feels bad" is usually a number, and this is the number.
 #[cfg(test)]
 mod mining_feel {
-    use crate::block::BlockId;
-    use crate::chunk::{Chunk, ChunkPos};
     use crate::config::{CHIP_INTERVAL, CHIP_RADIUS};
-    use crate::item::{self, ItemId};
+    use crate::content::block::BlockId;
+    use crate::content::item::{self, ItemId};
     use crate::world::World;
+    use crate::world::chunk::{Chunk, ChunkPos};
     use glam::Vec3;
     use std::sync::Arc;
 

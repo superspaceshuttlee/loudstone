@@ -24,8 +24,8 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use crate::block::BlockId;
-use crate::item::{ItemId, ToolKind, ToolTier};
+use crate::content::block::BlockId;
+use crate::content::item::{ItemId, ToolKind, ToolTier};
 
 // ---------------------------------------------------------------------------
 // Geometry of the atlas
@@ -2866,8 +2866,13 @@ mod tests {
                 out[i..i + 4].copy_from_slice(&c);
             }
         }
-        crate::screenshot::write_rgba_png(std::path::Path::new(&path), w as u32, h as u32, &out)
-            .expect("write atlas dump");
+        crate::render::screenshot::write_rgba_png(
+            std::path::Path::new(&path),
+            w as u32,
+            h as u32,
+            &out,
+        )
+        .expect("write atlas dump");
         println!("atlas written to {path}");
     }
 }

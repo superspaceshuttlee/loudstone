@@ -4,7 +4,7 @@
 //! key, `1`), `9..36` is the main grid. Every slot-taking method uses this flat
 //! index so the UI never has to translate.
 
-use crate::item::{ItemId, MAX_STACK};
+use crate::content::item::{ItemId, MAX_STACK};
 
 /// Hotbar slots, mapped to number keys 1-9.
 pub const HOTBAR_SIZE: usize = 9;

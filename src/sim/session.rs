@@ -6,7 +6,7 @@
 //! not, so the invariant lives only in whoever last edited the file. Grouping
 //! them puts the rule and the data in the same place.
 
-use crate::block::BlockId;
+use crate::content::block::BlockId;
 
 /// What the player is doing with their hands this frame, and the cooldowns
 /// that pace it.

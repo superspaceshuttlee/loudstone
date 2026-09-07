@@ -40,17 +40,17 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use crate::block::{BlockId, RenderKind};
-use crate::crafting::{Pattern, Recipe, SmeltRecipe};
-use crate::item::{HarvestRule, ItemId, ToolKind, ToolTier};
+use crate::content::block::{BlockId, RenderKind};
+use crate::content::crafting::{Pattern, Recipe, SmeltRecipe};
+use crate::content::item::{HarvestRule, ItemId, ToolKind, ToolTier};
 
 // ---------------------------------------------------------------------------
 // The built-in data
 // ---------------------------------------------------------------------------
 
-const EMBEDDED_BLOCKS: &str = include_str!("../assets/data/blocks.ron");
-const EMBEDDED_ITEMS: &str = include_str!("../assets/data/items.ron");
-const EMBEDDED_RECIPES: &str = include_str!("../assets/data/recipes.ron");
+const EMBEDDED_BLOCKS: &str = include_str!("../../assets/data/blocks.ron");
+const EMBEDDED_ITEMS: &str = include_str!("../../assets/data/items.ron");
+const EMBEDDED_RECIPES: &str = include_str!("../../assets/data/recipes.ron");
 
 const BLOCKS_FILE: &str = "blocks.ron";
 const ITEMS_FILE: &str = "items.ron";

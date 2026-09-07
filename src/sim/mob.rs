@@ -17,8 +17,8 @@ use glam::{IVec3, Vec3};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
-use crate::pathfind::{self, Path};
-use crate::sound::{NoiseEvent, SoundField, VoxelWorld};
+use crate::sim::pathfind::{self, Path};
+use crate::sim::sound::{NoiseEvent, SoundField, VoxelWorld};
 
 // =============================================================================
 // ============================  TUNING BLOCK  =================================
@@ -698,7 +698,7 @@ pub fn explode<W: VoxelWorld + ?Sized>(world: &mut W, centre: Vec3, radius: f32)
                 let r_eff = r_min + (r_max - r_min) * block_hash01(p);
                 if far <= r_eff {
                     // Wholly inside: clear it in one call.
-                    world.set_block(p.x, p.y, p.z, crate::block::BlockId::AIR);
+                    world.set_block(p.x, p.y, p.z, crate::content::block::BlockId::AIR);
                     report.blocks_destroyed += 1;
                     continue;
                 }
@@ -1384,9 +1384,9 @@ impl MobManager {
             let under = world.block_at(cell.x, cell.y - 1, cell.z);
             if matches!(
                 under,
-                crate::block::BlockId::LEAVES
-                    | crate::block::BlockId::BIRCH_LEAVES
-                    | crate::block::BlockId::SPRUCE_LEAVES
+                crate::content::block::BlockId::LEAVES
+                    | crate::content::block::BlockId::BIRCH_LEAVES
+                    | crate::content::block::BlockId::SPRUCE_LEAVES
             ) {
                 continue;
             }
@@ -1479,9 +1479,9 @@ fn ray_aabb(origin: Vec3, dir: Vec3, mn: Vec3, mx: Vec3) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::BlockId;
-    use crate::sound::mock::MockWorld;
-    use crate::sound::{self, LOUDNESS_CHIP, LOUDNESS_SMASH};
+    use crate::content::block::BlockId;
+    use crate::sim::sound::mock::MockWorld;
+    use crate::sim::sound::{self, LOUDNESS_CHIP, LOUDNESS_SMASH};
 
     const GROUND: i32 = 64;
     const DT: f32 = 1.0 / 60.0;

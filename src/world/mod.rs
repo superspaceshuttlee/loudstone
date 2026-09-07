@@ -12,12 +12,16 @@
 //! `VecDeque`. There is no per-frame allocate-and-sort of the whole world.
 //! Player edits jump the queue by pushing to the front.
 
-use crate::block::BlockId;
-use crate::chunk::{Chunk, ChunkPos, SubMask};
+pub mod chunk;
+pub mod light;
+pub mod worldgen;
+
 use crate::config::*;
-use crate::light::{self, LightVolume};
-use crate::mesh::{NEIGHBOR_COUNT, Neighborhood, Vertex, mesh_chunk};
-use crate::worldgen::{ColumnBounds, TerrainGen};
+use crate::content::block::BlockId;
+use crate::render::mesh::{NEIGHBOR_COUNT, Neighborhood, Vertex, mesh_chunk};
+use crate::world::chunk::{Chunk, ChunkPos, SubMask};
+use crate::world::light::LightVolume;
+use crate::world::worldgen::{ColumnBounds, TerrainGen};
 use glam::Vec3;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -265,7 +269,7 @@ impl World {
         if self.block_at(x, y + 1, z) == BlockId::WATER {
             return true;
         }
-        if y > crate::worldgen::tuning::WATER_LEVEL {
+        if y > crate::world::worldgen::tuning::WATER_LEVEL {
             return false;
         }
         [(1, 0), (-1, 0), (0, 1), (0, -1)]
