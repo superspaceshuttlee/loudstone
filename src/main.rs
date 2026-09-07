@@ -893,6 +893,43 @@ impl App {
 
     /// Stage the two headline mechanics in front of the camera so a single
     /// captured frame shows both: a chipped crater, and mobs standing near it.
+    /// Write the generated texture atlas out as a PNG, magnified.
+    ///
+    /// Every texture in this game is produced by code, which means the only way
+    /// to look at one has been to find the block in the world and walk up to it.
+    /// That is a hopeless way to judge a 16x16 tile: art is edited by looking at
+    /// it, and until now there was no way to look.
+    fn run_atlas(&mut self, path: &std::path::Path, zoom: usize) {
+        let a = render::texture::atlas();
+        let (w, h, ref px) = a.levels[0];
+        let (w, h) = (w as usize, h as usize);
+        let (zw, zh) = (w * zoom, h * zoom);
+        let mut out = vec![0u8; zw * zh * 4];
+        for y in 0..zh {
+            for x in 0..zw {
+                let i = ((y / zoom) * w + x / zoom) * 4;
+                let o = (y * zw + x) * 4;
+                // A checkerboard behind the transparent parts, so a cut-out tile
+                // is distinguishable from a black one.
+                let a8 = px[i + 3];
+                let bg = if ((x / zoom / 4) + (y / zoom / 4)) % 2 == 0 {
+                    60
+                } else {
+                    90
+                };
+                for c in 0..3 {
+                    let f = a8 as u32;
+                    out[o + c] = ((px[i + c] as u32 * f + bg * (255 - f)) / 255) as u8;
+                }
+                out[o + 3] = 255;
+            }
+        }
+        match render::screenshot::write_rgba_png(path, zw as u32, zh as u32, &out) {
+            Ok(()) => println!("[atlas] {zw}x{zh} -> {}", path.display()),
+            Err(e) => eprintln!("[atlas] could not write: {e}"),
+        }
+    }
+
     /// Render a top-down map of the surface, and quit.
     ///
     /// A screenshot from inside the world shows a couple of hundred blocks of
@@ -1968,6 +2005,11 @@ impl ApplicationHandler for App {
                         if self.shot_countdown == 60 {
                             if self.cli.models_review {
                                 self.run_model_review();
+                            }
+                            if let Some(p) = self.cli.atlas_path.clone() {
+                                self.run_atlas(&p, 4);
+                                event_loop.exit();
+                                return;
                             }
                             if let Some(map) = self.cli.map_path.clone() {
                                 let span = self.cli.map_span;

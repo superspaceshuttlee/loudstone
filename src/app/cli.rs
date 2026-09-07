@@ -34,6 +34,8 @@ pub struct Cli {
     pub map_path: Option<std::path::PathBuf>,
     /// `--map-span <blocks>`: half-width of the mapped region.
     pub map_span: i32,
+    /// `--atlas <path>`: dump the generated texture atlas and quit.
+    pub atlas_path: Option<std::path::PathBuf>,
 }
 
 impl Cli {
@@ -66,6 +68,7 @@ impl Cli {
             map_span: value_of("--map-span")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(2048),
+            atlas_path: value_of("--atlas").map(std::path::PathBuf::from),
         }
     }
 
@@ -84,7 +87,8 @@ impl Cli {
                 || self.ui_demo.is_some()
                 || self.model_demo.is_some()
                 || self.gauntlet_seed.is_some()
-                || self.map_path.is_some())
+                || self.map_path.is_some()
+                || self.atlas_path.is_some())
     }
 }
 
@@ -104,7 +108,7 @@ mod tests {
     /// "is this automated" list waits at the title screen and reads as a hang.
     #[test]
     fn every_capture_mode_counts_as_automated() {
-        let modes: [(&str, fn(&mut Cli)); 8] = [
+        let modes: [(&str, fn(&mut Cli)); 9] = [
             ("shot", |c| c.shot_path = Some("x.png".into())),
             ("vista", |c| c.vista = true),
             ("demo", |c| c.demo = true),
@@ -113,6 +117,7 @@ mod tests {
             ("model", |c| c.model_demo = Some("pig".into())),
             ("gauntlet", |c| c.gauntlet_seed = Some(1)),
             ("map", |c| c.map_path = Some("m.png".into())),
+            ("atlas", |c| c.atlas_path = Some("a.png".into())),
         ];
         for (name, set) in modes {
             let mut cli = Cli::default();

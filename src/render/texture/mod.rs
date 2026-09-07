@@ -470,6 +470,223 @@ pub fn atlas() -> &'static Atlas {
 }
 
 // ---------------------------------------------------------------------------
+// Building the atlas
+// ---------------------------------------------------------------------------
+
+pub fn build_atlas() -> Atlas {
+    let mut px = vec![0u8; ATLAS_W * ATLAS_H * 4];
+    // Only the individually painted tiles. Icon tiles are composited from these
+    // afterwards, and running `paint_tile` over them first would fill them with
+    // the missing-texture pattern, which then shows through everywhere the cube
+    // silhouette does not cover.
+    for t in 0..ICON_BASE as usize {
+        let mut tex = Tex::new();
+        paint_tile(t as TileId, &mut tex);
+        let (ox, oy) = tile_origin(t as TileId);
+        for y in 0..TILE {
+            for x in 0..TILE {
+                let c = tex.get(x, y);
+                let i = ((oy + y) * ATLAS_W + ox + x) * 4;
+                px[i..i + 4].copy_from_slice(&c);
+            }
+        }
+    }
+
+    paint_block_icons_into(&mut px);
+    paint_skins_into(&mut px);
+
+    let mut levels = vec![(ATLAS_W as u32, ATLAS_H as u32, px)];
+    for _ in 1..MIP_LEVELS {
+        let (w, h, ref src) = levels[levels.len() - 1];
+        levels.push(downsample(w as usize, h as usize, src));
+    }
+    Atlas { levels }
+}
+
+/// Composite one isometric cube icon per block, from that block's own faces.
+///
+/// This runs after the ordinary tiles are painted because it *reads* them: the
+/// icon for stone is the stone texture seen on three faces, so there is exactly
+/// one definition of what stone looks like and an icon can never drift away from
+/// the block it stands for.
+///
+/// The projection is the standard 2:1 pixel-art isometric, which is what makes
+/// it land on whole pixels instead of a stair-stepped mush: the top face is a
+/// rhombus 16 wide and 8 tall, and the two side faces hang below it. Each face
+/// is a parallelogram, so mapping a screen pixel back to a texture coordinate is
+/// a 2x2 solve rather than anything iterative.
+pub fn paint_block_icons_into(px: &mut [u8]) {
+    // Corners, in tile pixels. The cube fills the 16x16 tile.
+    const TOP_L: [f32; 2] = [0.0, 4.0];
+    const TOP_T: [f32; 2] = [8.0, 0.0];
+    const TOP_R: [f32; 2] = [16.0, 4.0];
+    const MID: [f32; 2] = [8.0, 8.0];
+    // Shades matching the world's own face shading, so an icon and the block it
+    // places are lit the same way.
+    const TOP_SHADE: f32 = 1.0;
+    const LEFT_SHADE: f32 = 0.80;
+    const RIGHT_SHADE: f32 = 0.62;
+
+    for id in 0..ICON_SLOTS {
+        let block = BlockId(id as u8);
+        if block.is_air() {
+            continue;
+        }
+        let tile = ICON_BASE + id as TileId;
+        let (ox, oy) = tile_origin(tile);
+        // Faces: 0 is +Y (top), 2 is a side.
+        let top_tile = block_tile(block, 0);
+        let side_tile = match block {
+            BlockId::FURNACE => T_FURNACE_FRONT,
+            BlockId::CRAFTING_TABLE => T_TABLE_FRONT,
+            _ => block_tile(block, 2),
+        };
+
+        for y in 0..TILE {
+            for x in 0..TILE {
+                let p = [x as f32 + 0.5, y as f32 + 0.5];
+                // Try each face in turn; the first that contains the point wins.
+                let hit = face_uv(p, TOP_L, sub(TOP_T, TOP_L), sub(TOP_R, TOP_L))
+                    .map(|uv| (top_tile, uv, TOP_SHADE))
+                    .or_else(|| {
+                        face_uv(p, TOP_L, sub(MID, TOP_L), [0.0, 8.0])
+                            .map(|uv| (side_tile, uv, LEFT_SHADE))
+                    })
+                    .or_else(|| {
+                        face_uv(p, MID, sub(TOP_R, MID), [0.0, 8.0])
+                            .map(|uv| (side_tile, uv, RIGHT_SHADE))
+                    });
+                if hit.is_none() {
+                    continue;
+                }
+                // Supersample. One icon pixel covers about two source texels in
+                // each direction, because a 16-texel cube face is squeezed into
+                // roughly 8 pixels of a 16x16 icon. Taking a single sample
+                // throws half the texture away, and picks a *different* half on
+                // each neighbouring pixel -- which is why a stone cube came out
+                // as mush rather than as stone.
+                let mut acc = [0.0f32; 3];
+                let mut hits = 0.0f32;
+                for (dx, dy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                    let q = [x as f32 + dx, y as f32 + dy];
+                    let sample = face_uv(q, TOP_L, sub(TOP_T, TOP_L), sub(TOP_R, TOP_L))
+                        .map(|uv| (top_tile, uv, TOP_SHADE))
+                        .or_else(|| {
+                            face_uv(q, TOP_L, sub(MID, TOP_L), [0.0, 8.0])
+                                .map(|uv| (side_tile, uv, LEFT_SHADE))
+                        })
+                        .or_else(|| {
+                            face_uv(q, MID, sub(TOP_R, MID), [0.0, 8.0])
+                                .map(|uv| (side_tile, uv, RIGHT_SHADE))
+                        });
+                    let Some((src, [u, v], k)) = sample else {
+                        continue;
+                    };
+                    let sx = ((u * TILE as f32) as usize).min(TILE - 1);
+                    let sy = ((v * TILE as f32) as usize).min(TILE - 1);
+                    let (sox, soy) = tile_origin(src);
+                    let i = ((soy + sy) * ATLAS_W + sox + sx) * 4;
+                    if px[i + 3] < 128 {
+                        continue; // a cut-out face leaves the icon see-through
+                    }
+                    for c in 0..3 {
+                        acc[c] += px[i + c] as f32 * k;
+                    }
+                    hits += 1.0;
+                }
+                if hits == 0.0 {
+                    continue;
+                }
+                let lit = [
+                    (acc[0] / hits) as u8,
+                    (acc[1] / hits) as u8,
+                    (acc[2] / hits) as u8,
+                ];
+                let o = ((oy + y) * ATLAS_W + ox + x) * 4;
+                px[o..o + 4].copy_from_slice(&[lit[0], lit[1], lit[2], 255]);
+            }
+        }
+    }
+}
+
+pub fn sub(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+/// Where `p` falls on the parallelogram at `origin` spanned by `e1` and `e2`,
+/// or `None` if it falls outside. Returns coordinates in 0..1 along each edge.
+pub fn face_uv(p: [f32; 2], origin: [f32; 2], e1: [f32; 2], e2: [f32; 2]) -> Option<[f32; 2]> {
+    let d = [p[0] - origin[0], p[1] - origin[1]];
+    let det = e1[0] * e2[1] - e1[1] * e2[0];
+    if det.abs() < 1.0e-6 {
+        return None;
+    }
+    let u = (d[0] * e2[1] - d[1] * e2[0]) / det;
+    let v = (e1[0] * d[1] - e1[1] * d[0]) / det;
+    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+        return None;
+    }
+    Some([u, v])
+}
+
+/// Halve an RGBA image with a 2x2 box filter, averaging in linear light and
+/// weighting colour by alpha so cut-out tiles do not grow dark fringes.
+pub fn downsample(w: usize, h: usize, src: &[u8]) -> (u32, u32, Vec<u8>) {
+    let (nw, nh) = (w / 2, h / 2);
+    let mut out = vec![0u8; nw * nh * 4];
+    for y in 0..nh {
+        for x in 0..nw {
+            let mut rgb = [0.0f32; 3];
+            let mut a = 0.0f32;
+            let mut wsum = 0.0f32;
+            let mut plain = [0.0f32; 3];
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let i = ((y * 2 + dy) * w + x * 2 + dx) * 4;
+                    let av = src[i + 3] as f32 / 255.0;
+                    for c in 0..3 {
+                        let lin = srgb_to_linear(src[i + c]);
+                        rgb[c] += lin * av;
+                        plain[c] += lin;
+                    }
+                    a += av;
+                    wsum += av;
+                }
+            }
+            let i = (y * nw + x) * 4;
+            for c in 0..3 {
+                let v = if wsum > 0.0 {
+                    rgb[c] / wsum
+                } else {
+                    plain[c] / 4.0
+                };
+                out[i + c] = linear_to_srgb(v);
+            }
+            out[i + 3] = (a / 4.0 * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    (nw as u32, nh as u32, out)
+}
+
+pub fn srgb_to_linear(v: u8) -> f32 {
+    let c = v as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub fn linear_to_srgb(v: f32) -> u8 {
+    let c = if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (c * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+// ---------------------------------------------------------------------------
 // Submodules
 // ---------------------------------------------------------------------------
 //
