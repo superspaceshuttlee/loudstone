@@ -65,17 +65,27 @@ pub mod tuning {
     /// Piecewise-linear map from continent noise (-1..1) to height relative to
     /// [`BASE_HEIGHT`]. This is the single most useful dial in the file: the
     /// flat middle section is lowland, the right-hand climb is mountains.
+    /// Piecewise-linear map from continent noise (-1..1) to height relative to
+    /// [`BASE_HEIGHT`].
+    ///
+    /// The shape of this curve is what decides how much of the world is a place
+    /// you would walk around in and how much is a wall. The climb used to begin
+    /// at 0.52, which put everything past the middle of the noise range into
+    /// foothills or higher -- so mountains were not landmarks, they were the
+    /// default, and the world read as one continuous overwhelming massif with
+    /// occasional flat bits. The climb now starts later and rises harder, so the
+    /// same peaks exist and are rarer, with real lowland between them.
     pub const CONTINENT_SPLINE: &[(f64, f64)] = &[
-        (-1.00, -40.0), // abyss
-        (-0.55, -22.0), // deep ocean
-        (-0.22, -7.0),  // shelf
+        (-1.00, -42.0), // abyss
+        (-0.55, -24.0), // deep ocean
+        (-0.22, -8.0),  // shelf
         (-0.05, 0.0),   // shoreline
-        (0.10, 5.0),    // coastal plain
-        (0.32, 10.0),   // lowland
-        (0.52, 24.0),   // upland
-        (0.72, 52.0),   // foothills
-        (0.88, 84.0),   // mountains
-        (1.00, 118.0),  // peaks
+        (0.20, 4.0),    // coastal plain
+        (0.56, 10.0),   // lowland -- the widest band, deliberately
+        (0.76, 22.0),   // upland
+        (0.88, 46.0),   // foothills
+        (0.96, 74.0),   // mountains
+        (1.00, 100.0),  // peaks
     ];
 
     // --- local relief -------------------------------------------------------
@@ -132,36 +142,57 @@ pub mod tuning {
     /// the meshing skirt here. Roughening the height by about a block at a
     /// wavelength of a few blocks breaks the regularity in the same place the
     /// eye sees it, and stays inside the architecture.
-    pub const SCREE_SCALE: f64 = 0.29;
-    pub const SCREE_AMP: f64 = 1.5;
+    pub const SCREE_SCALE: f64 = 0.115;
+    pub const SCREE_AMP: f64 = 1.0;
     /// Roughness applied to all land; bare rock gets [`SCREE_AMP`] on top.
-    pub const SCREE_BASE: f64 = 2.2;
+    pub const SCREE_BASE: f64 = 1.1;
     /// Size of the patches of andesite, gravel and granite on an exposed face.
     pub const ROCK_PATCH_SCALE: f64 = 0.032;
 
     /// Ridged noise for mountain spines.
     pub const RIDGE_SCALE: f64 = 0.0055;
     pub const RIDGE_OCTAVES: u32 = 3;
-    pub const RIDGE_AMP: f64 = 46.0;
+    pub const RIDGE_AMP: f64 = 30.0;
     /// Domain-warp distance for the ridge field, as a fraction of one lattice
     /// cell. See [`TerrainGen::ridged2`] -- without this the mountains wear a
     /// regular grid of pyramids.
     pub const RIDGE_WARP: f64 = 0.42;
     /// Continent height at which ridging starts and reaches full strength.
-    pub const MOUNTAIN_LO: f64 = 10.0;
-    pub const MOUNTAIN_HI: f64 = 46.0;
+    /// Continent height at which ridging starts and reaches full strength.
+    ///
+    /// Raised so that ridged spines belong to genuinely high ground. Starting at
+    /// 10 meant almost half of all land got some ridging on top of whatever the
+    /// spline already gave it, which is a large part of how the height field
+    /// came to overshoot the world ceiling.
+    pub const MOUNTAIN_LO: f64 = 26.0;
+    pub const MOUNTAIN_HI: f64 = 64.0;
 
     // --- rivers -------------------------------------------------------------
 
     pub const RIVER_SCALE: f64 = 0.0013;
-    pub const RIVER_OCTAVES: u32 = 2;
+    /// Three octaves, plus the warp below. With two octaves at this scale the
+    /// field's wavelength is about 770 blocks, so across any view you can
+    /// actually see, its zero contour -- which is where the river runs -- is
+    /// barely a third of one wave and comes out as a straight line ruled across
+    /// the landscape. Rivers meander because their course is set by fine detail
+    /// as well as by the broad slope.
+    pub const RIVER_OCTAVES: u32 = 3;
+    /// How far the river's course is dragged sideways by the warp field, in
+    /// blocks. This is what turns a smooth contour into a winding one.
+    pub const RIVER_WARP: f64 = 220.0;
+    /// A river stops carving this far above the waterline.
+    ///
+    /// Rivers run downhill to the sea; they do not cross summits. The previous
+    /// rule faded them by mountain-ness to 15% strength, and 15% of a carve
+    /// down to the riverbed is still an eighteen-block slot sawn over the top of
+    /// a peak -- which is exactly what it did, while the comment above it
+    /// claimed peaks were safe.
+    pub const RIVER_MAX_RISE: f64 = 30.0;
     pub const RIVER_GAIN: f64 = 2.2;
     /// Half-width of a river in noise units. Bigger is wider.
     pub const RIVER_WIDTH: f64 = 0.055;
     /// Bed height, relative to [`WATER_LEVEL`]. Must be negative or rivers dry up.
     pub const RIVER_BED_DROP: f64 = 4.0;
-    /// Rivers fade out on mountains rather than sawing them in half.
-    pub const RIVER_MOUNTAIN_FADE: f64 = 0.85;
 
     // --- guaranteed dry spawn ----------------------------------------------
 
@@ -191,18 +222,41 @@ pub mod tuning {
     pub const CLIMATE_SIGMA: f32 = 0.17;
     /// Temperature lost per block of altitude above the waterline. This is what
     /// puts snow on peaks without a "snow biome" existing.
-    pub const TEMP_LAPSE: f32 = 0.0056;
+    /// Temperature lost per block of altitude above the waterline.
+    ///
+    /// This one number decides how much of the world is snow, and at 0.0056 the
+    /// answer was "most of it". An average column starts around temperature 0.5
+    /// and turns to snow below [`SNOW_TEMP`], so the snowline sat only
+    /// `(0.5 - 0.2) / 0.0056` = 54 blocks above the sea -- around y=117, which
+    /// is *below* the foothills the continent spline produces. Every landmass
+    /// past its own coastal fringe came out white, and a world where the default
+    /// ground colour is snow reads as one endless overwhelming mountain no
+    /// matter how good the terrain under it is.
+    ///
+    /// At 0.0022 the same column keeps its grass to about 135 blocks above the
+    /// sea, so snow is a peak rather than the default ground colour. Cold biomes
+    /// still ice over far lower, and hot ones never freeze at all.
+    pub const TEMP_LAPSE: f32 = 0.0026;
     /// Below this temperature the ground carries snow.
-    pub const SNOW_TEMP: f32 = 0.20;
+    ///
+    /// This is the other half of how much of the world is white: it decides how
+    /// much land is snowy at sea level regardless of height. Together with
+    /// [`TEMP_LAPSE`] it is the whole snow budget, and the two were tuned as if
+    /// independent -- which is how the world ended up three-quarters snow with
+    /// neither number looking obviously wrong on its own.
+    pub const SNOW_TEMP: f32 = 0.16;
     /// Below this temperature open water freezes over.
-    pub const ICE_TEMP: f32 = 0.16;
+    pub const ICE_TEMP: f32 = 0.125;
 
     // --- alpine rock --------------------------------------------------------
 
     /// Surface heights between these two get progressively more bare stone
     /// instead of soil. Dithered per column, so the treeline is speckled.
-    pub const ROCK_LO: f32 = 88.0;
-    pub const ROCK_HI: f32 = 132.0;
+    /// Where soil gives way to bare alpine rock. Raised alongside
+    /// [`TEMP_LAPSE`]: with the treeline at y=88 and the snowline just above it,
+    /// the two together left no band of high *green* ground anywhere.
+    pub const ROCK_LO: f32 = 124.0;
+    pub const ROCK_HI: f32 = 172.0;
     /// Column counts as "mountain biome" above this rock fraction.
     pub const MOUNTAIN_BIOME_ROCK: f32 = 0.35;
 
@@ -245,6 +299,8 @@ pub mod tuning {
 
     pub const RAVINE_SCALE: f64 = 0.0042;
     pub const RAVINE_OCTAVES: u32 = 2;
+    /// Sideways drag on a ravine's course, in blocks. See [`RIVER_WARP`].
+    pub const RAVINE_WARP: f64 = 90.0;
     /// Half-width in BLOCKS. Measured as a real distance rather than a noise
     /// value, so a ravine is the same width wherever it runs.
     pub const RAVINE_HALF_WIDTH: f64 = 4.5;
@@ -253,6 +309,29 @@ pub mod tuning {
     pub const RAVINE_CUT: f32 = 0.34;
     /// Fraction of the ravine's height over which it tapers to a point.
     pub const RAVINE_TAPER: f32 = 0.30;
+    /// How far above the waterline a ravine may still open at the surface.
+    ///
+    /// A ravine used to run from [`RAVINE_MIN_Y`] up to whatever the surface
+    /// happened to be, so under a two-hundred-block mountain it became a
+    /// two-hundred-block slot that split the peak from summit to base. Real
+    /// ravines are a feature of low ground. Above this, the ravine stops before
+    /// it reaches daylight; well above it, there is no ravine at all.
+    pub const RAVINE_MAX_RISE: i32 = 34;
+    /// Fraction of a ravine's height over which it closes up again at the top,
+    /// so it narrows into the ground instead of ending in a full-width gash.
+    pub const RAVINE_ROOF_TAPER: f32 = 0.22;
+    /// How hard 3D noise pushes the walls in and out, as a fraction of the cut
+    /// threshold.
+    ///
+    /// Without this a ravine's walls are *perfectly flat vertical planes*: the
+    /// carve reads a single per-column number, so every column is either cut for
+    /// its whole height or not cut at all, and the result looks sawn rather than
+    /// eroded.
+    pub const RAVINE_WALL: f32 = 0.30;
+    pub const RAVINE_WALL_SCALE: f64 = 0.055;
+    /// Walls vary more slowly up the slot than across it, which is what makes
+    /// them read as walls rather than as a cloud of blobs.
+    pub const RAVINE_WALL_SQUASH: f64 = 0.45;
 
     // --- bedrock ------------------------------------------------------------
 
@@ -1110,12 +1189,30 @@ impl TerrainGen {
         h += detail * t::DETAIL_AMP * (0.25 + t::DETAIL_SLOPE_GAIN * steep).min(1.0);
 
         // Rivers: carve a valley down to the bed wherever the river field
-        // crosses zero, fading out on mountains so peaks are not sawn in half.
-        let rn = (Self::fbm2(&self.river, xf, zf, t::RIVER_SCALE, t::RIVER_OCTAVES)
-            * t::RIVER_GAIN)
+        // crosses zero.
+        //
+        // The course is domain warped so it winds. Without that the field is so
+        // low-frequency that its zero contour is a straight line for hundreds of
+        // blocks, and a river reads as a canal someone ruled across the map.
+        let rw = t::RIVER_WARP;
+        let river_warp_scale = t::RIVER_SCALE * 2.3;
+        let rwx = Self::fbm2(&self.warp, xf + 1700.0, zf - 400.0, river_warp_scale, 2);
+        let rwz = Self::fbm2(&self.warp, xf - 2600.0, zf + 900.0, river_warp_scale, 2);
+        let rn = (Self::fbm2(
+            &self.river,
+            xf + rwx * rw,
+            zf + rwz * rw,
+            t::RIVER_SCALE,
+            t::RIVER_OCTAVES,
+        ) * t::RIVER_GAIN)
             .clamp(-1.0, 1.0);
         let river = 1.0 - smoothstep64(0.0, t::RIVER_WIDTH, rn.abs());
-        let river_strength = river * (1.0 - t::RIVER_MOUNTAIN_FADE * mountainness);
+        // Fade on *altitude*, not on mountain-ness. Water runs downhill, so the
+        // question is how high this ground already stands, and gating on that is
+        // what actually stops a channel appearing over a summit.
+        let rise = h - t::WATER_LEVEL as f64;
+        let too_high = smoothstep64(t::RIVER_MAX_RISE * 0.4, t::RIVER_MAX_RISE, rise);
+        let river_strength = river * (1.0 - too_high);
         let bed = t::WATER_LEVEL as f64 - t::RIVER_BED_DROP;
         if river_strength > 0.0 && h > bed {
             h += (bed - h) * river_strength;
@@ -1139,7 +1236,24 @@ impl TerrainGen {
         let rock = smoothstep(t::ROCK_LO, t::ROCK_HI, surface as f32);
 
         // --- ravines --------------------------------------------------------
-        let rav_n = Self::fbm2(&self.ravine, xf, zf, t::RAVINE_SCALE, t::RAVINE_OCTAVES);
+        // Warped for the same reason the river is: an unwarped contour at this
+        // scale runs dead straight for hundreds of blocks.
+        let vwx = Self::fbm2(
+            &self.warp,
+            xf - 800.0,
+            zf + 2400.0,
+            t::RAVINE_SCALE * 2.0,
+            2,
+        );
+        let vwz = Self::fbm2(
+            &self.warp,
+            xf + 3300.0,
+            zf - 1500.0,
+            t::RAVINE_SCALE * 2.0,
+            2,
+        );
+        let (rvx, rvz) = (xf + vwx * t::RAVINE_WARP, zf + vwz * t::RAVINE_WARP);
+        let rav_n = Self::fbm2(&self.ravine, rvx, rvz, t::RAVINE_SCALE, t::RAVINE_OCTAVES);
         let ravine = if surface > t::WATER_LEVEL + 2 {
             // Taper to nothing over the spawn clearing: a ravine straight
             // through the origin would drop the player into it on frame one.
@@ -1158,13 +1272,49 @@ impl TerrainGen {
             // approximate distance in blocks, which is constant-width by
             // construction and has no plateaus to blow up.
             let e = 2.0;
-            let gx = Self::fbm2(&self.ravine, xf + e, zf, t::RAVINE_SCALE, t::RAVINE_OCTAVES)
-                - Self::fbm2(&self.ravine, xf - e, zf, t::RAVINE_SCALE, t::RAVINE_OCTAVES);
-            let gz = Self::fbm2(&self.ravine, xf, zf + e, t::RAVINE_SCALE, t::RAVINE_OCTAVES)
-                - Self::fbm2(&self.ravine, xf, zf - e, t::RAVINE_SCALE, t::RAVINE_OCTAVES);
+            // Sampled at the *warped* position, so the gradient measured here
+            // belongs to the same field `rav_n` came from. Measuring the
+            // unwarped field would give a width that has nothing to do with the
+            // curve actually being carved.
+            let gx = Self::fbm2(
+                &self.ravine,
+                rvx + e,
+                rvz,
+                t::RAVINE_SCALE,
+                t::RAVINE_OCTAVES,
+            ) - Self::fbm2(
+                &self.ravine,
+                rvx - e,
+                rvz,
+                t::RAVINE_SCALE,
+                t::RAVINE_OCTAVES,
+            );
+            let gz = Self::fbm2(
+                &self.ravine,
+                rvx,
+                rvz + e,
+                t::RAVINE_SCALE,
+                t::RAVINE_OCTAVES,
+            ) - Self::fbm2(
+                &self.ravine,
+                rvx,
+                rvz - e,
+                t::RAVINE_SCALE,
+                t::RAVINE_OCTAVES,
+            );
             let grad = (((gx * gx + gz * gz).sqrt()) / (2.0 * e)).max(1.0e-9);
             let dist_blocks = rav_n.abs() / grad;
+            // Ravines belong to low ground. Fading here rather than clamping
+            // the carve means a mountain simply has no ravine, instead of
+            // having one that stops abruptly in mid-air.
+            let rise = (surface - t::WATER_LEVEL) as f32;
+            let high = smoothstep(
+                t::RAVINE_MAX_RISE as f32,
+                t::RAVINE_MAX_RISE as f32 * 2.2,
+                rise,
+            );
             ((1.0 - smoothstep64(0.0, t::RAVINE_HALF_WIDTH, dist_blocks)) * keep) as f32
+                * (1.0 - high)
         } else {
             0.0
         };
@@ -1384,6 +1534,50 @@ impl TerrainGen {
         unit(hash3(self.seed, x, y, z, tuning::SALT_BEDROCK)) < keep
     }
 
+    /// Whether a **ravine** removes the ground here.
+    ///
+    /// Split out from [`TerrainGen::is_carved`] so the rule can be asked about
+    /// by itself. Testing it through the block query could not tell a ravine
+    /// from an ordinary cave, and "is there air up here" is a much weaker claim
+    /// than "does the ravine reach up here".
+    fn ravine_carves(&self, x: i32, y: i32, z: i32, col: &Column) -> bool {
+        use tuning as t;
+        // Ravines: a slot that opens at the surface on low ground.
+        //
+        // The top is capped rather than following the surface. Letting it run to
+        // whatever height the land reached is what turned a ravine under a
+        // mountain into a two-hundred-block gash splitting the peak in half.
+        let ravine_top = col
+            .surface
+            .min(t::WATER_LEVEL + t::RAVINE_MAX_RISE)
+            .max(t::RAVINE_MIN_Y + 1);
+        if col.ravine > 0.0 && y <= ravine_top && y >= t::RAVINE_MIN_Y {
+            let span = (ravine_top - t::RAVINE_MIN_Y).max(1) as f32;
+            let f = (y - t::RAVINE_MIN_Y) as f32 / span;
+            // Narrow at the floor and again at the roof, so it is a slot with
+            // ends rather than a trench with square corners.
+            let profile = smoothstep(0.0, t::RAVINE_TAPER, f)
+                * (1.0 - smoothstep(1.0 - t::RAVINE_ROOF_TAPER, 1.0, f));
+            // 3D wobble on the walls. This is the whole difference between a
+            // canyon and a saw cut.
+            let sc = t::RAVINE_WALL_SCALE;
+            let wall = Self::fbm3(
+                &self.cave_b,
+                [
+                    x as f64 * sc,
+                    y as f64 * sc * t::RAVINE_WALL_SQUASH,
+                    z as f64 * sc,
+                ],
+                2,
+            ) as f32
+                * t::RAVINE_WALL;
+            if col.ravine * profile + wall * col.ravine > t::RAVINE_CUT {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Whether a cave, cavern or ravine removes the ground at this position.
     fn is_carved(&self, x: i32, y: i32, z: i32, col: &Column) -> bool {
         use tuning as t;
@@ -1391,16 +1585,9 @@ impl TerrainGen {
             return false;
         }
 
-        // Ravines: a vertical slot that reaches all the way to daylight.
-        if col.ravine > 0.0 && y <= col.surface && y >= t::RAVINE_MIN_Y {
-            let span = (col.surface - t::RAVINE_MIN_Y).max(1) as f32;
-            let f = (y - t::RAVINE_MIN_Y) as f32 / span;
-            let profile = smoothstep(0.0, t::RAVINE_TAPER, f);
-            if col.ravine * profile > t::RAVINE_CUT {
-                return true;
-            }
+        if self.ravine_carves(x, y, z, col) {
+            return true;
         }
-
         // Caves stay below the soil, except on bare mountain rock where they
         // cut close enough to open as cliff mouths and overhangs.
         let fade = if col.surface <= t::WATER_LEVEL + 1 {
@@ -2581,6 +2768,180 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// No single ground cover may dominate the world.
+    ///
+    /// This is the check that was missing while the world was three-quarters
+    /// snow. Every individual rule was defensible -- temperature falls with
+    /// altitude, cold ground carries snow, the continent spline makes mountains
+    /// -- and their product was a planet of white. Nothing tested the *result*,
+    /// because every test asked about one column at a time, and no single column
+    /// was wrong.
+    #[test]
+    fn the_world_is_not_mostly_one_thing() {
+        let g = TerrainGen::new(2024);
+        // Keyed by raw id: BlockId is a plain newtype and deliberately not Hash.
+        let mut counts = [0u32; 256];
+        let mut land = 0u32;
+        for iz in 0..90 {
+            for ix in 0..90 {
+                // Spread the sample over several thousand blocks so it is a
+                // question about the world, not about one hillside.
+                let x = -3600 + ix * 80;
+                let z = -3600 + iz * 80;
+                let col = g.column(x, z);
+                if col.surface <= tuning::WATER_LEVEL {
+                    continue;
+                }
+                land += 1;
+                counts[col.top.0 as usize] += 1;
+            }
+        }
+        assert!(land > 1000, "only {land} land columns sampled");
+        let mut tally: Vec<_> = counts
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .map(|(i, n)| (*n, BlockId(i as u8)))
+            .collect();
+        tally.sort_by(|a, b| b.0.cmp(&a.0));
+        let report: Vec<String> = tally
+            .iter()
+            .take(5)
+            .map(|(n, b)| format!("{} {:.0}%", b.name(), *n as f32 / land as f32 * 100.0))
+            .collect();
+        println!("ground cover: {}", report.join(", "));
+        {
+            let mut hs: Vec<i32> = Vec::new();
+            let mut cold = 0u32;
+            for iz in 0..90 {
+                for ix in 0..90 {
+                    let (x, z) = (-3600 + ix * 80, -3600 + iz * 80);
+                    let col = g.column(x, z);
+                    if col.surface > tuning::WATER_LEVEL {
+                        hs.push(col.surface);
+                        // Would this column be snowy even at sea level?
+                        if col.temp
+                            + (col.surface - tuning::WATER_LEVEL).max(0) as f32 * tuning::TEMP_LAPSE
+                            < tuning::SNOW_TEMP
+                        {
+                            cold += 1;
+                        }
+                    }
+                }
+            }
+            hs.sort();
+            let pc = |p: usize| hs[hs.len() * p / 100];
+            println!(
+                "land height: p50 {} p75 {} p90 {} p99 {} max {} | cold-at-sea-level {:.0}%",
+                pc(50),
+                pc(75),
+                pc(90),
+                pc(99),
+                hs[hs.len() - 1],
+                cold as f32 / hs.len() as f32 * 100.0
+            );
+        }
+        let at_ceiling = {
+            let mut n = 0u32;
+            for iz in 0..90 {
+                for ix in 0..90 {
+                    let col = g.column(-3600 + ix * 80, -3600 + iz * 80);
+                    if col.surface >= tuning::MAX_TERRAIN_Y {
+                        n += 1;
+                    }
+                }
+            }
+            n as f32 / land as f32
+        };
+        assert!(
+            at_ceiling < 0.005,
+            "{:.0}% of land is pinned at the MAX_TERRAIN_Y clamp. A clamp is not              a mountain top -- it slices every peak that reaches it into the same              flat mesa at exactly {}.",
+            at_ceiling * 100.0,
+            tuning::MAX_TERRAIN_Y
+        );
+
+        let (top_n, top_b) = tally[0];
+        let share = top_n as f32 / land as f32;
+        assert!(
+            share < 0.55,
+            "{} covers {:.0}% of all land -- the world is monotonous.              Full breakdown: {}",
+            top_b.name(),
+            share * 100.0,
+            report.join(", ")
+        );
+        let snow = counts[BlockId::SNOW.0 as usize] as f32 / land as f32;
+        assert!(
+            snow < 0.25,
+            "snow covers {:.0}% of land; it should be peaks, not the default              ground colour. Full breakdown: {}",
+            snow * 100.0,
+            report.join(", ")
+        );
+    }
+
+    /// A ravine must not split a mountain from summit to base.
+    ///
+    /// It used to run from `RAVINE_MIN_Y` to whatever the surface happened to
+    /// be, so under a two-hundred-block peak it became a two-hundred-block slot
+    /// cut clean through the mountain.
+    #[test]
+    fn a_ravine_never_opens_high_on_a_mountain() {
+        let g = TerrainGen::new(31337);
+        let ceiling = tuning::WATER_LEVEL + tuning::RAVINE_MAX_RISE;
+        let mut checked = 0;
+        for k in 0..900 {
+            let x = -4000 + k * 9;
+            let z = 2500 - k * 7;
+            let col = g.column(x, z);
+            if col.ravine <= 0.0 {
+                continue;
+            }
+            checked += 1;
+            // Asked of the ravine rule directly. Looking for air instead would
+            // also find ordinary caves and prove nothing about ravines.
+            for y in ceiling + 1..=col.surface {
+                assert!(
+                    !g.ravine_carves(x, y, z, &col),
+                    "ravine reaches {x},{y},{z}: surface {}, cap {ceiling}",
+                    col.surface
+                );
+            }
+        }
+        assert!(checked > 20, "only {checked} ravine columns sampled");
+    }
+
+    /// A ravine's walls must not be perfectly flat vertical planes.
+    ///
+    /// The carve reads one number per column, so without 3D variation every
+    /// column is either cut for its whole height or not at all, and the result
+    /// looks sawn rather than eroded.
+    #[test]
+    fn ravine_walls_are_not_flat_planes() {
+        let g = TerrainGen::new(31337);
+        let mut heights = Vec::new();
+        for k in 0..4000 {
+            let x = -4000 + k * 3;
+            let z = 2500 - k * 2;
+            let col = g.column(x, z);
+            if col.ravine <= 0.0 {
+                continue;
+            }
+            let cut = (tuning::RAVINE_MIN_Y..col.surface.min(200))
+                .filter(|&y| g.ravine_carves(x, y, z, &col))
+                .count();
+            if cut > 0 {
+                heights.push(cut);
+            }
+        }
+        assert!(heights.len() > 30, "only {} carved columns", heights.len());
+        let distinct: std::collections::HashSet<_> = heights.iter().collect();
+        assert!(
+            distinct.len() >= heights.len() / 4,
+            "carved height is nearly constant across {} columns ({} distinct):              the walls are flat planes",
+            heights.len(),
+            distinct.len()
+        );
     }
 
     /// A steep slope must not be a perfectly regular staircase.

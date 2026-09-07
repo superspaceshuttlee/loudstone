@@ -30,6 +30,10 @@ pub struct Cli {
     pub gauntlet_secs: Option<f32>,
     /// `--title`: show the menu even in a mode that would normally skip it.
     pub force_title: bool,
+    /// `--map <path>`: write a top-down map of the surface and quit.
+    pub map_path: Option<std::path::PathBuf>,
+    /// `--map-span <blocks>`: half-width of the mapped region.
+    pub map_span: i32,
 }
 
 impl Cli {
@@ -58,6 +62,10 @@ impl Cli {
             }),
             gauntlet_secs: value_of("--secs").and_then(|v| v.parse().ok()),
             force_title: flag("--title"),
+            map_path: value_of("--map").map(std::path::PathBuf::from),
+            map_span: value_of("--map-span")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2048),
         }
     }
 
@@ -75,7 +83,8 @@ impl Cli {
                 || self.models_review
                 || self.ui_demo.is_some()
                 || self.model_demo.is_some()
-                || self.gauntlet_seed.is_some())
+                || self.gauntlet_seed.is_some()
+                || self.map_path.is_some())
     }
 }
 
@@ -95,7 +104,7 @@ mod tests {
     /// "is this automated" list waits at the title screen and reads as a hang.
     #[test]
     fn every_capture_mode_counts_as_automated() {
-        let modes: [(&str, fn(&mut Cli)); 7] = [
+        let modes: [(&str, fn(&mut Cli)); 8] = [
             ("shot", |c| c.shot_path = Some("x.png".into())),
             ("vista", |c| c.vista = true),
             ("demo", |c| c.demo = true),
@@ -103,6 +112,7 @@ mod tests {
             ("ui", |c| c.ui_demo = Some("inv".into())),
             ("model", |c| c.model_demo = Some("pig".into())),
             ("gauntlet", |c| c.gauntlet_seed = Some(1)),
+            ("map", |c| c.map_path = Some("m.png".into())),
         ];
         for (name, set) in modes {
             let mut cli = Cli::default();

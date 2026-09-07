@@ -838,6 +838,58 @@ impl App {
 
     /// Stage the two headline mechanics in front of the camera so a single
     /// captured frame shows both: a chipped crater, and mobs standing near it.
+    /// Render a top-down map of the surface, and quit.
+    ///
+    /// A screenshot from inside the world shows a couple of hundred blocks of
+    /// it, from one angle, hazed at the back. That is the wrong instrument for
+    /// judging whether a *river meanders* or whether a coastline has shape: both
+    /// are questions about kilometres, and from the ground a river that runs
+    /// dead straight for a thousand blocks looks exactly like a river.
+    fn run_map(&mut self, path: &std::path::Path, span: i32, step: i32) {
+        let n = (span * 2 / step) as u32;
+        let mut px = vec![0u8; (n * n * 4) as usize];
+        let terrain = &self.world.terrain;
+        for iy in 0..n {
+            for ix in 0..n {
+                let x = -span + ix as i32 * step;
+                let z = -span + iy as i32 * step;
+                let h = terrain.height_at(x, z);
+                let water = h <= worldgen::tuning::WATER_LEVEL;
+                // Height as brightness, with a shaded relief term so ridges and
+                // valleys read as shape rather than as a smooth gradient.
+                let west = terrain.height_at(x - step, z);
+                let relief = ((h - west) as f32 * 0.10).clamp(-0.35, 0.35);
+                let t = ((h - 40) as f32 / 180.0).clamp(0.0, 1.0);
+                let rgb = if water {
+                    let d = ((worldgen::tuning::WATER_LEVEL - h) as f32 / 40.0).clamp(0.0, 1.0);
+                    [0.15 - d * 0.1, 0.35 - d * 0.2, 0.70 - d * 0.3]
+                } else {
+                    let top = terrain.column(x, z).top;
+                    let base = match top {
+                        BlockId::SAND => [0.86, 0.80, 0.55],
+                        BlockId::SNOW => [0.95, 0.96, 0.98],
+                        BlockId::STONE | BlockId::ANDESITE | BlockId::GRAVEL => [0.55, 0.55, 0.57],
+                        _ => [0.30 + t * 0.25, 0.55 - t * 0.12, 0.25],
+                    };
+                    [base[0] + relief, base[1] + relief, base[2] + relief]
+                };
+                let o = ((iy * n + ix) * 4) as usize;
+                for c in 0..3 {
+                    px[o + c] = (rgb[c].clamp(0.0, 1.0) * 255.0) as u8;
+                }
+                px[o + 3] = 255;
+            }
+        }
+        match screenshot::write_rgba_png(path, n, n, &px) {
+            Ok(()) => println!(
+                "[map] {n}x{n} covering {} blocks -> {}",
+                span * 2,
+                path.display()
+            ),
+            Err(e) => eprintln!("[map] could not write: {e}"),
+        }
+    }
+
     /// Stand somewhere high and look out over the land.
     ///
     /// There was previously no way to look at the terrain except to play the
@@ -870,11 +922,11 @@ impl App {
         self.player.vel = Vec3::ZERO;
         self.player.noclip = true;
         self.camera.pos = eye;
-        // Face the world origin, tilted down enough to hold both land and sky.
-        self.camera.yaw = (-(bz as f32)).atan2(-(bx as f32));
-        self.camera.pitch = -0.42;
+        // Look back at the summit, tilted down enough to hold land and sky.
+        self.camera.yaw = (bz as f32 - eye.z).atan2(bx as f32 - eye.x);
+        self.camera.pitch = -0.22;
         self.time_of_day = DAY_LENGTH * 0.14;
-        println!("[vista] camera at {bx}, {}, {bz}", by + 10);
+        println!("[vista] looking at the peak at {bx}, {by}, {bz}");
     }
 
     fn run_demo(&mut self) {
@@ -1852,6 +1904,12 @@ impl ApplicationHandler for App {
                         if self.shot_countdown == 60 {
                             if self.cli.models_review {
                                 self.run_model_review();
+                            }
+                            if let Some(map) = self.cli.map_path.clone() {
+                                let span = self.cli.map_span;
+                                self.run_map(&map, span, (span / 512).max(1));
+                                event_loop.exit();
+                                return;
                             }
                             if self.cli.vista {
                                 self.run_vista();
